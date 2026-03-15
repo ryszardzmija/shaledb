@@ -1,0 +1,4 @@
+storage:
+  maxSegmentSize: 65536  # 64 KB
+  maxRecordSize: 16384  # 16 KB
+  segmentDir: data/segments
