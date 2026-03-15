@@ -15,11 +15,16 @@ import java.util.Optional;
 public class Application {
     private static final Logger logger = LoggerFactory.getLogger(Application.class);
 
-    void main() {
-        StorageConfig storageConfig = StorageConfigLoader.loadFromFile(Path.of("config/application.yaml"));
+    void main(String[] args) {
+        String configFile = "config/application.yaml";
+        if (args.length > 0) {
+            configFile = args[0];
+        }
+
+        StorageConfig storageConfig = StorageConfigLoader.loadFromFile(Path.of(configFile));
         StorageConfigHolder.initialize(storageConfig);
 
-        Path segmentDir = Path.of("data/segments");
+        Path segmentDir = StorageConfigHolder.get().segmentDir();
         try {
             Files.createDirectories(segmentDir);
             try (var store = new KeyValueStore(segmentDir)) {
