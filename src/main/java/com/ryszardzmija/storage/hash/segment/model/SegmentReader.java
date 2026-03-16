@@ -18,18 +18,24 @@ public class SegmentReader {
         this.index = Objects.requireNonNull(index);
     }
 
-    public Optional<byte[]> get(ByteKey key) {
+    public LookupResult get(ByteKey key) {
         // Note:
-        // Here, we rely on the assumption that the index is in a consistent state,
-        // meaning that if the key was deleted then getKeyOffset() will not
-        // return the offset of a stale record.
-        Optional<Long> offset = index.getKeyOffset(key);
+        // Here we rely on the contract of an Index which implements a state machine
+        // where the key can be in exactly three mutually exclusive states:
+        // - deleted: it's marked as deleted inside the segment
+        // - present: it's present in the segment and not deleted
+        // - not present: it's not in the segment
 
+        if (index.isDeleted(key)) {
+            return new LookupResult.Deleted();
+        }
+
+        Optional<Long> offset = index.getKeyOffset(key);
         if (offset.isEmpty()) {
-            return Optional.empty();
+            return new LookupResult.NotPresent();
         }
 
         ReadResult readResult = recordReader.read(new ReadRequest(offset.get()));
-        return Optional.of(readResult.recordPayload().value());
+        return new LookupResult.Present(readResult.recordPayload().value());
     }
 }

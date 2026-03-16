@@ -27,11 +27,6 @@ public class HashIndex implements Index {
     }
 
     @Override
-    public boolean isPresent(ByteKey key) {
-        return offsetMap.containsKey(key);
-    }
-
-    @Override
     public boolean isDeleted(ByteKey key) {
         return deletedSet.contains(key);
     }

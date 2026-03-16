@@ -8,6 +8,7 @@ import com.ryszardzmija.storage.hash.segment.loader.LoadedSegments;
 import com.ryszardzmija.storage.hash.segment.loader.SegmentLoader;
 import com.ryszardzmija.storage.hash.segment.loader.SegmentLoadingException;
 import com.ryszardzmija.storage.hash.segment.model.ImmutableSegment;
+import com.ryszardzmija.storage.hash.segment.model.LookupResult;
 import com.ryszardzmija.storage.hash.segment.model.MutableSegment;
 import com.ryszardzmija.storage.hash.segment.model.SegmentIOException;
 import com.ryszardzmija.storage.hash.segment.rollover.*;
@@ -80,21 +81,19 @@ public class HashIndexEngine implements StorageEngine {
         ByteKey byteKey = new ByteKey(key);
 
         try {
-            if (mutableSegment.foundDeleted(byteKey)) {
-                return Optional.empty();
-            }
-            Optional<byte[]> result = mutableSegment.get(byteKey);
-            if (result.isPresent()) {
-                return result;
+            LookupResult mutableResult = mutableSegment.get(byteKey);
+            switch (mutableResult) {
+                case LookupResult.Deleted _ -> { return Optional.empty(); }
+                case LookupResult.Present mappedValue -> { return Optional.of(mappedValue.value()); }
+                case LookupResult.NotPresent _ -> {  /* continue */ }
             }
 
             for (ImmutableSegment segment : immutableSegments) {
-                if (segment.foundDeleted(byteKey)) {
-                    return Optional.empty();
-                }
-                result = segment.get(byteKey);
-                if (result.isPresent()) {
-                    return result;
+                LookupResult immutableResult = segment.get(byteKey);
+                switch (immutableResult) {
+                    case LookupResult.Deleted _ -> { return Optional.empty(); }
+                    case LookupResult.Present mappedValue -> { return Optional.of(mappedValue.value()); }
+                    case LookupResult.NotPresent _ -> {  /* continue */ }
                 }
             }
 

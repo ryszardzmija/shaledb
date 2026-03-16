@@ -25,7 +25,6 @@ public class MutableSegment implements AutoCloseable {
     private final FileChannel writeChannel;
     private final SegmentReader segmentReader;
     private final SegmentWriter segmentWriter;
-    private final Index index;
 
     public MutableSegment(Path path) {
         this.path = Objects.requireNonNull(path);
@@ -35,7 +34,7 @@ public class MutableSegment implements AutoCloseable {
         try {
             openedReadChannel = FileChannel.open(path, StandardOpenOption.READ);
             openedWriteChannel = FileChannel.open(path, StandardOpenOption.APPEND);
-            this.index = new IndexBuilder(openedReadChannel).build();
+            Index index = new IndexBuilder(openedReadChannel).build();
 
             this.readChannel = openedReadChannel;
             this.writeChannel = openedWriteChannel;
@@ -61,11 +60,7 @@ public class MutableSegment implements AutoCloseable {
         }
     }
 
-    public boolean foundDeleted(ByteKey key) {
-        return index.isDeleted(key);
-    }
-
-    public Optional<byte[]> get(ByteKey key) {
+    public LookupResult get(ByteKey key) {
         try {
             return segmentReader.get(key);
         } catch (RecordIOException e) {
