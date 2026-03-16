@@ -5,7 +5,7 @@ import com.ryszardzmija.storage.config.StorageConfigHolder;
 public record ReadRequest(long offset) {
     public ReadRequest {
         long maxSegmentSize = StorageConfigHolder.get().maxSegmentSize();
-        if (offset < 0 || offset > StorageConfigHolder.get().maxSegmentSize()) {
+        if (offset < 0 || offset > maxSegmentSize) {
             throw new IllegalArgumentException("offset must be non-negative and within the maximum size of a segment: " + maxSegmentSize);
         }
     }
