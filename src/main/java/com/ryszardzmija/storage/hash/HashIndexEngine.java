@@ -11,11 +11,15 @@ import com.ryszardzmija.storage.hash.segment.model.ImmutableSegment;
 import com.ryszardzmija.storage.hash.segment.model.MutableSegment;
 import com.ryszardzmija.storage.hash.segment.model.SegmentIOException;
 import com.ryszardzmija.storage.hash.segment.rollover.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.util.*;
 
 public class HashIndexEngine implements StorageEngine {
+    private static final Logger logger = LoggerFactory.getLogger(HashIndexEngine.class);
+
     private final RolloverPolicy rolloverPolicy;
     private final RolloverHandler rolloverHandler;
 
@@ -52,12 +56,18 @@ public class HashIndexEngine implements StorageEngine {
 
         try {
             mutableSegment.put(new ByteKey(key), value);
-
-            handleRollover();
         } catch (SegmentIOException e) {
             throw new StorageEngineException("Failed to write segment", e);
+        }
+
+        try {
+            handleRollover();
         } catch (RolloverException e) {
-            throw new StorageEngineException("Failed to roll over to new segment", e);
+            // TODO: Decide whether to implement retry logic or wait for the next
+            // TODO: write for a retry. If the rollover keeps failing we should
+            // TODO: bound the size of the segment and probably refuse writes after
+            // TODO: some threshold is reached.
+            logger.warn("Rollover failed after successful write", e);
         }
     }
 
@@ -70,12 +80,18 @@ public class HashIndexEngine implements StorageEngine {
         ByteKey byteKey = new ByteKey(key);
 
         try {
+            if (mutableSegment.foundDeleted(byteKey)) {
+                return Optional.empty();
+            }
             Optional<byte[]> result = mutableSegment.get(byteKey);
             if (result.isPresent()) {
                 return result;
             }
 
             for (ImmutableSegment segment : immutableSegments) {
+                if (segment.foundDeleted(byteKey)) {
+                    return Optional.empty();
+                }
                 result = segment.get(byteKey);
                 if (result.isPresent()) {
                     return result;
@@ -85,6 +101,25 @@ public class HashIndexEngine implements StorageEngine {
             return Optional.empty();
         } catch (SegmentIOException e) {
             throw new StorageEngineException("Failed to read segment", e);
+        }
+    }
+
+    @Override
+    public void delete(byte[] key) {
+        if (key == null || key.length == 0) {
+            throw new IllegalArgumentException("Key must not be null or empty");
+        }
+
+        try {
+            mutableSegment.delete(new ByteKey(key));
+        } catch (SegmentIOException e) {
+            throw new StorageEngineException("Failed to write segment", e);
+        }
+
+        try {
+            handleRollover();
+        } catch (RolloverException e) {
+            logger.warn("Rollover failed after successful delete", e);
         }
     }
 

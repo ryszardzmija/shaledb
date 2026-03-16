@@ -1,8 +1,8 @@
 package com.ryszardzmija.storage.hash.segment.model;
 
-import com.ryszardzmija.storage.format.RecordIOException;
-import com.ryszardzmija.storage.format.RecordReader;
-import com.ryszardzmija.storage.format.RecordWriter;
+import com.ryszardzmija.storage.serialization.io.RecordIOException;
+import com.ryszardzmija.storage.serialization.io.RecordReader;
+import com.ryszardzmija.storage.serialization.io.RecordWriter;
 import com.ryszardzmija.storage.hash.index.ByteKey;
 import com.ryszardzmija.storage.hash.index.Index;
 import com.ryszardzmija.storage.hash.index.IndexBuildException;
@@ -25,6 +25,7 @@ public class MutableSegment implements AutoCloseable {
     private final FileChannel writeChannel;
     private final SegmentReader segmentReader;
     private final SegmentWriter segmentWriter;
+    private final Index index;
 
     public MutableSegment(Path path) {
         this.path = Objects.requireNonNull(path);
@@ -34,7 +35,7 @@ public class MutableSegment implements AutoCloseable {
         try {
             openedReadChannel = FileChannel.open(path, StandardOpenOption.READ);
             openedWriteChannel = FileChannel.open(path, StandardOpenOption.APPEND);
-            Index index = new IndexBuilder(openedReadChannel).build();
+            this.index = new IndexBuilder(openedReadChannel).build();
 
             this.readChannel = openedReadChannel;
             this.writeChannel = openedWriteChannel;
@@ -60,6 +61,10 @@ public class MutableSegment implements AutoCloseable {
         }
     }
 
+    public boolean foundDeleted(ByteKey key) {
+        return index.isDeleted(key);
+    }
+
     public Optional<byte[]> get(ByteKey key) {
         try {
             return segmentReader.get(key);
@@ -71,6 +76,14 @@ public class MutableSegment implements AutoCloseable {
     public void put(ByteKey key, byte[] value) {
         try {
             segmentWriter.put(key, value);
+        } catch (RecordIOException e) {
+            throw new SegmentIOException("Failed to write to segment " + path, e);
+        }
+    }
+
+    public void delete(ByteKey key) {
+        try {
+            segmentWriter.delete(key);
         } catch (RecordIOException e) {
             throw new SegmentIOException("Failed to write to segment " + path, e);
         }

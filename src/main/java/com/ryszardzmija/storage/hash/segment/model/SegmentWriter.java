@@ -1,10 +1,12 @@
 package com.ryszardzmija.storage.hash.segment.model;
 
-import com.ryszardzmija.storage.format.RecordWriteResult;
-import com.ryszardzmija.storage.format.RecordWriter;
-import com.ryszardzmija.storage.format.Record;
+import com.ryszardzmija.storage.serialization.io.WriteRequest;
+import com.ryszardzmija.storage.serialization.io.WriteResult;
+import com.ryszardzmija.storage.serialization.io.RecordWriter;
+import com.ryszardzmija.storage.serialization.record.RecordPayload;
 import com.ryszardzmija.storage.hash.index.ByteKey;
 import com.ryszardzmija.storage.hash.index.Index;
+import com.ryszardzmija.storage.serialization.record.RecordType;
 
 import java.util.Objects;
 
@@ -18,8 +20,15 @@ public class SegmentWriter {
     }
 
     public void put(ByteKey key, byte[] value) {
-        Record record = new Record(key.getData(), value);
-        RecordWriteResult writeResult = recordWriter.write(record);
-        index.putKeyOffset(key, writeResult.writeOffset());
+        RecordPayload recordPayload = new RecordPayload(key.getData(), value);
+        WriteRequest writeRequest = new WriteRequest(recordPayload, RecordType.NORMAL);
+        WriteResult writeResult = recordWriter.write(writeRequest);
+        index.markPresent(key, writeResult.writeOffset());
+    }
+
+    public void delete(ByteKey key) {
+        WriteRequest writeRequest = new WriteRequest(RecordPayload.forTombstone(key.getData()), RecordType.TOMBSTONE);
+        recordWriter.write(writeRequest);
+        index.markDeleted(key);
     }
 }

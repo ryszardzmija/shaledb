@@ -1,6 +1,11 @@
-package com.ryszardzmija.storage.format;
+package com.ryszardzmija.storage.serialization.io;
 
 import com.ryszardzmija.storage.config.StorageConfigHolder;
+import com.ryszardzmija.storage.serialization.record.RecordType;
+import com.ryszardzmija.storage.serialization.spec.FormatInfo;
+import com.ryszardzmija.storage.serialization.record.RecordPayload;
+import com.ryszardzmija.storage.serialization.spec.RecordTypeCodec;
+import com.ryszardzmija.storage.serialization.spec.TypeDecodingException;
 
 import java.io.IOException;
 import java.nio.BufferUnderflowException;
@@ -17,7 +22,9 @@ public class RecordReader {
         this.readChannel = Objects.requireNonNull(readChannel);
     }
 
-    public RecordReadResult read(long offset) {
+    public ReadResult read(ReadRequest request) {
+        long offset = request.offset();
+
         try {
             ByteBuffer headerBuffer = ByteBuffer.allocate(FormatInfo.getHeaderSize()).order(FormatInfo.BYTE_ORDER);
             readIntoBuffer(headerBuffer, offset);
@@ -25,6 +32,10 @@ public class RecordReader {
 
             byte[] storedChecksum = new byte[FormatInfo.CHECKSUM_FIELD_SIZE];
             headerBuffer.get(storedChecksum);
+
+            byte typeValue = headerBuffer.get();
+            RecordType recordType = RecordTypeCodec.decode(typeValue);
+
             int keyDataSize = headerBuffer.getInt();
             int valueDataSize = headerBuffer.getInt();
 
@@ -53,9 +64,11 @@ public class RecordReader {
 
             long nextRecordOffset = offset + FormatInfo.getHeaderSize() + keyDataSize + valueDataSize;
 
-            return new RecordReadResult(new Record(keyData, valueData), nextRecordOffset);
+            return new ReadResult(new RecordPayload(keyData, valueData), recordType, nextRecordOffset);
         } catch (BufferUnderflowException e) {
             throw new DataCorruptionException("Unexpected end of record data", offset, e);
+        } catch (TypeDecodingException e) {
+            throw new DataCorruptionException("Error decoding record type", offset, e);
         } catch (IOException e) {
             throw new RecordIOException("Error reading record data at offset: " + offset, e);
         }

@@ -1,7 +1,8 @@
 package com.ryszardzmija.storage.hash.segment.model;
 
-import com.ryszardzmija.storage.format.RecordReadResult;
-import com.ryszardzmija.storage.format.RecordReader;
+import com.ryszardzmija.storage.serialization.io.ReadRequest;
+import com.ryszardzmija.storage.serialization.io.ReadResult;
+import com.ryszardzmija.storage.serialization.io.RecordReader;
 import com.ryszardzmija.storage.hash.index.ByteKey;
 import com.ryszardzmija.storage.hash.index.Index;
 
@@ -18,13 +19,17 @@ public class SegmentReader {
     }
 
     public Optional<byte[]> get(ByteKey key) {
+        // Note:
+        // Here, we rely on the assumption that the index is in a consistent state,
+        // meaning that if the key was deleted then getKeyOffset() will not
+        // return the offset of a stale record.
         Optional<Long> offset = index.getKeyOffset(key);
 
         if (offset.isEmpty()) {
             return Optional.empty();
         }
 
-        RecordReadResult readResult = recordReader.read(offset.get());
-        return Optional.of(readResult.record().value());
+        ReadResult readResult = recordReader.read(new ReadRequest(offset.get()));
+        return Optional.of(readResult.recordPayload().value());
     }
 }

@@ -35,6 +35,15 @@ public class KeyValueStore implements AutoCloseable {
         }
     }
 
+    public void delete(byte[] key) {
+        try {
+            storageEngine.delete(key);
+        } catch (StorageEngineException e) {
+            logger.error("Failed to delete key-value pair", e);
+            throw e;
+        }
+    }
+
     public Optional<byte[]> get(byte[] key) {
         try {
             return storageEngine.get(key);

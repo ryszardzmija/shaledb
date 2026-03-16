@@ -24,6 +24,15 @@ public interface StorageEngine {
     Optional<byte[]> get(byte[] key);
 
     /**
+     * Deletes the key-value pair associated with the key.
+     *
+     * @param key a non-empty array of bytes representing the key
+     * @throws IllegalArgumentException if the key is null or empty
+     * @throws StorageEngineException if the key-value pair associated with the key fails to be deleted
+     */
+    void delete(byte[] key);
+
+    /**
      * Releases all resources held by the storage engine.
      *
      * <p>After calling this method, later calls to {@link #put(byte[], byte[])} or

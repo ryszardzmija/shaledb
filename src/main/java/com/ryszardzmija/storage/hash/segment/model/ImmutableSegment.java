@@ -1,7 +1,8 @@
 package com.ryszardzmija.storage.hash.segment.model;
 
-import com.ryszardzmija.storage.format.RecordIOException;
-import com.ryszardzmija.storage.format.RecordReader;
+import com.ryszardzmija.storage.hash.index.Index;
+import com.ryszardzmija.storage.serialization.io.RecordIOException;
+import com.ryszardzmija.storage.serialization.io.RecordReader;
 import com.ryszardzmija.storage.hash.index.ByteKey;
 import com.ryszardzmija.storage.hash.index.IndexBuildException;
 import com.ryszardzmija.storage.hash.index.IndexBuilder;
@@ -21,6 +22,7 @@ public class ImmutableSegment implements AutoCloseable {
     private final Path path;
     private final FileChannel readChannel;
     private final SegmentReader segmentReader;
+    private final Index index;
 
     public ImmutableSegment(Path path) {
         this.path = Objects.requireNonNull(path);
@@ -30,7 +32,8 @@ public class ImmutableSegment implements AutoCloseable {
             openedReadChannel = FileChannel.open(path, StandardOpenOption.READ);
 
             this.readChannel = openedReadChannel;
-            this.segmentReader = new SegmentReader(new RecordReader(readChannel), new IndexBuilder(readChannel).build());
+            this.index = new IndexBuilder(readChannel).build();
+            this.segmentReader = new SegmentReader(new RecordReader(readChannel), index);
         } catch (IndexBuildException | IOException e) {
             if (openedReadChannel != null) {
                 try {
@@ -44,6 +47,10 @@ public class ImmutableSegment implements AutoCloseable {
 
             throw new SegmentIOException("Failed to open the segment file " + path, e);
         }
+    }
+
+    public boolean foundDeleted(ByteKey key) {
+        return index.isDeleted(key);
     }
 
     public Optional<byte[]> get(ByteKey key) {

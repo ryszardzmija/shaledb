@@ -42,6 +42,15 @@ public class Application {
                     System.out.println("Key: Answer, Value: " + decodedAnswer);
                 }
 
+                store.delete(getBytes("Greeting"));
+                greetingResult = store.get(getBytes("Greeting"));
+                if (greetingResult.isPresent()) {
+                    String decodedGreeting = new String(greetingResult.get(), StandardCharsets.UTF_8);
+                    System.out.println("Key: Greeting, Value: " + decodedGreeting);
+                } else {
+                    System.out.println("Key: 'Greeting' Not Found");
+                }
+
                 store.put(getBytes("Greeting"), getBytes("Hello, Universe!"));
                 greetingResult = store.get(getBytes("Greeting"));
                 if (greetingResult.isPresent()) {
