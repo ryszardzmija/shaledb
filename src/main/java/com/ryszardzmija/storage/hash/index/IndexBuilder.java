@@ -1,7 +1,10 @@
 package com.ryszardzmija.storage.hash.index;
 
-import com.ryszardzmija.storage.format.RecordIOException;
-import com.ryszardzmija.storage.format.RecordReader;
+import com.ryszardzmija.storage.serialization.io.ReadRequest;
+import com.ryszardzmija.storage.serialization.io.ReadResult;
+import com.ryszardzmija.storage.serialization.io.RecordIOException;
+import com.ryszardzmija.storage.serialization.io.RecordReader;
+import com.ryszardzmija.storage.serialization.record.RecordType;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -29,10 +32,17 @@ public class IndexBuilder {
 
         long currentOffset = 0;
         while (currentOffset < readChannel.size()) {
-            var readRecord = recordReader.read(currentOffset);
-            ByteKey key = new ByteKey(readRecord.record().key());
-            index.putKeyOffset(key, currentOffset);
-            currentOffset = readRecord.nextRecordOffset();
+            ReadRequest readRequest = new ReadRequest(currentOffset);
+            ReadResult readResult = recordReader.read(readRequest);
+
+            ByteKey key = new ByteKey(readResult.recordPayload().key());
+            if (readResult.recordType() == RecordType.TOMBSTONE) {
+                index.markDeleted(key);
+            } else {
+                index.markPresent(key, currentOffset);
+            }
+
+            currentOffset = readResult.nextRecordOffset();
         }
 
         return index;

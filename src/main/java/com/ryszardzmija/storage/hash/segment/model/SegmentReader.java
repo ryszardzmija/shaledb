@@ -1,7 +1,8 @@
 package com.ryszardzmija.storage.hash.segment.model;
 
-import com.ryszardzmija.storage.format.RecordReadResult;
-import com.ryszardzmija.storage.format.RecordReader;
+import com.ryszardzmija.storage.serialization.io.ReadRequest;
+import com.ryszardzmija.storage.serialization.io.ReadResult;
+import com.ryszardzmija.storage.serialization.io.RecordReader;
 import com.ryszardzmija.storage.hash.index.ByteKey;
 import com.ryszardzmija.storage.hash.index.Index;
 
@@ -17,14 +18,24 @@ public class SegmentReader {
         this.index = Objects.requireNonNull(index);
     }
 
-    public Optional<byte[]> get(ByteKey key) {
-        Optional<Long> offset = index.getKeyOffset(key);
+    public LookupResult get(ByteKey key) {
+        // Note:
+        // Here we rely on the contract of an Index which implements a state machine
+        // where the key can be in exactly three mutually exclusive states:
+        // - deleted: it's marked as deleted inside the segment
+        // - present: it's present in the segment and not deleted
+        // - not present: it's not in the segment
 
-        if (offset.isEmpty()) {
-            return Optional.empty();
+        if (index.isDeleted(key)) {
+            return new LookupResult.Deleted();
         }
 
-        RecordReadResult readResult = recordReader.read(offset.get());
-        return Optional.of(readResult.record().value());
+        Optional<Long> offset = index.getKeyOffset(key);
+        if (offset.isEmpty()) {
+            return new LookupResult.NotPresent();
+        }
+
+        ReadResult readResult = recordReader.read(new ReadRequest(offset.get()));
+        return new LookupResult.Present(readResult.recordPayload().value());
     }
 }

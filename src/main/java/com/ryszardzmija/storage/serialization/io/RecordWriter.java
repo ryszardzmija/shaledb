@@ -1,4 +1,9 @@
-package com.ryszardzmija.storage.format;
+package com.ryszardzmija.storage.serialization.io;
+
+import com.ryszardzmija.storage.serialization.spec.FormatInfo;
+import com.ryszardzmija.storage.serialization.record.RecordPayload;
+import com.ryszardzmija.storage.serialization.record.RecordType;
+import com.ryszardzmija.storage.serialization.spec.RecordTypeCodec;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -14,31 +19,37 @@ public class RecordWriter {
         this.writeChannel = Objects.requireNonNull(writeChannel);
     }
 
-    public RecordWriteResult write(Record record) {
+    public WriteResult write(WriteRequest request) {
         try {
-            int keyLength = record.key().length;
-            int valueLength = record.value().length;
+            RecordPayload recordPayload = request.payload();
+            RecordType recordType = request.type();
+
+            int keyLength = recordPayload.key().length;
+            int valueLength = recordPayload.value().length;
+            byte encodedType = RecordTypeCodec.encode(recordType);
 
             ByteBuffer buffer = ByteBuffer.allocate(FormatInfo.getHeaderSize() + keyLength + valueLength).order(FormatInfo.BYTE_ORDER);
 
-            ByteBuffer checksumHeaderFields = ByteBuffer.allocate(Integer.BYTES * 2).order(FormatInfo.BYTE_ORDER);
+            ByteBuffer checksumHeaderFields = ByteBuffer.allocate(FormatInfo.getChecksumHeaderFieldsSize()).order(FormatInfo.BYTE_ORDER);
+            checksumHeaderFields.put(encodedType);
             checksumHeaderFields.putInt(keyLength);
             checksumHeaderFields.putInt(valueLength);
             checksumHeaderFields.flip();
             Checksum checksum = new CRC32C();
             checksum.update(checksumHeaderFields);
-            checksum.update(record.key());
-            checksum.update(record.value());
+            checksum.update(recordPayload.key());
+            checksum.update(recordPayload.value());
             long checksumValue = checksum.getValue();
 
             buffer.putInt((int) checksumValue);
-            buffer.putInt(record.key().length);
-            buffer.putInt(record.value().length);
-            buffer.put(record.key());
-            buffer.put(record.value());
+            buffer.put(encodedType);
+            buffer.putInt(recordPayload.key().length);
+            buffer.putInt(recordPayload.value().length);
+            buffer.put(recordPayload.key());
+            buffer.put(recordPayload.value());
             buffer.flip();
 
-            RecordWriteResult result = new RecordWriteResult(writeChannel.position());
+            WriteResult result = new WriteResult(writeChannel.position());
             // Note: writes are not fsynced per-record for performance reasons.
             // Data in the OS page cache may be lost on a hard crash.
             // This needs to be handled using a separate mechanism.

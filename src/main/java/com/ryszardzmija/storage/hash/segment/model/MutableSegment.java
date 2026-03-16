@@ -1,8 +1,8 @@
 package com.ryszardzmija.storage.hash.segment.model;
 
-import com.ryszardzmija.storage.format.RecordIOException;
-import com.ryszardzmija.storage.format.RecordReader;
-import com.ryszardzmija.storage.format.RecordWriter;
+import com.ryszardzmija.storage.serialization.io.RecordIOException;
+import com.ryszardzmija.storage.serialization.io.RecordReader;
+import com.ryszardzmija.storage.serialization.io.RecordWriter;
 import com.ryszardzmija.storage.hash.index.ByteKey;
 import com.ryszardzmija.storage.hash.index.Index;
 import com.ryszardzmija.storage.hash.index.IndexBuildException;
@@ -60,7 +60,7 @@ public class MutableSegment implements AutoCloseable {
         }
     }
 
-    public Optional<byte[]> get(ByteKey key) {
+    public LookupResult get(ByteKey key) {
         try {
             return segmentReader.get(key);
         } catch (RecordIOException e) {
@@ -71,6 +71,14 @@ public class MutableSegment implements AutoCloseable {
     public void put(ByteKey key, byte[] value) {
         try {
             segmentWriter.put(key, value);
+        } catch (RecordIOException e) {
+            throw new SegmentIOException("Failed to write to segment " + path, e);
+        }
+    }
+
+    public void delete(ByteKey key) {
+        try {
+            segmentWriter.delete(key);
         } catch (RecordIOException e) {
             throw new SegmentIOException("Failed to write to segment " + path, e);
         }

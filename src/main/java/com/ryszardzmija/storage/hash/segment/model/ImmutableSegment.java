@@ -1,7 +1,8 @@
 package com.ryszardzmija.storage.hash.segment.model;
 
-import com.ryszardzmija.storage.format.RecordIOException;
-import com.ryszardzmija.storage.format.RecordReader;
+import com.ryszardzmija.storage.hash.index.Index;
+import com.ryszardzmija.storage.serialization.io.RecordIOException;
+import com.ryszardzmija.storage.serialization.io.RecordReader;
 import com.ryszardzmija.storage.hash.index.ByteKey;
 import com.ryszardzmija.storage.hash.index.IndexBuildException;
 import com.ryszardzmija.storage.hash.index.IndexBuilder;
@@ -30,7 +31,8 @@ public class ImmutableSegment implements AutoCloseable {
             openedReadChannel = FileChannel.open(path, StandardOpenOption.READ);
 
             this.readChannel = openedReadChannel;
-            this.segmentReader = new SegmentReader(new RecordReader(readChannel), new IndexBuilder(readChannel).build());
+            Index index = new IndexBuilder(readChannel).build();
+            this.segmentReader = new SegmentReader(new RecordReader(readChannel), index);
         } catch (IndexBuildException | IOException e) {
             if (openedReadChannel != null) {
                 try {
@@ -46,7 +48,7 @@ public class ImmutableSegment implements AutoCloseable {
         }
     }
 
-    public Optional<byte[]> get(ByteKey key) {
+    public LookupResult get(ByteKey key) {
         try {
             return segmentReader.get(key);
         } catch (RecordIOException e) {

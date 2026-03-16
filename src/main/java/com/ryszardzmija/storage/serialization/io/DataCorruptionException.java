@@ -1,4 +1,4 @@
-package com.ryszardzmija.storage.format;
+package com.ryszardzmija.storage.serialization.io;
 
 public class DataCorruptionException extends RuntimeException {
     private static final String ERROR_MESSAGE_TEMPLATE = "Data corruption detected at offset %d: %s";
