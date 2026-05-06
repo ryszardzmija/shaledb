@@ -1,16 +1,24 @@
 package com.ryszardzmija.shaledb.storage.config;
 
 import java.nio.file.Path;
-import java.util.Objects;
 
-public record StorageConfig(long maxSegmentSize, long maxRecordSize, Path segmentDir) {
+public record StorageConfig(long maxSegmentSize, long maxPayloadSize, Path segmentDir) {
     public StorageConfig {
         if (maxSegmentSize <= 0) {
-            throw new IllegalArgumentException("maxSegmentSize must be positive");
+            throw new IllegalArgumentException("maxSegmentSize must be greater than 0 bytes, but was " + maxSegmentSize);
         }
-        if (maxRecordSize <= 0 || maxRecordSize > maxSegmentSize) {
-            throw new IllegalArgumentException("maxRecordSize must be positive and less than maxSegmentSize");
+
+        if (maxPayloadSize <= 0) {
+            throw new IllegalArgumentException("maxPayloadSize must be greater than 0 bytes, but was " + maxPayloadSize);
         }
-        Objects.requireNonNull(segmentDir);
+
+        if (maxPayloadSize > maxSegmentSize) {
+            throw new IllegalArgumentException("maxPayloadSize must not exceed maxSegmentSize: maxPayloadSize=" +
+                    maxPayloadSize + ", maxSegmentSize=" + maxSegmentSize);
+        }
+
+        if (segmentDir == null) {
+            throw new IllegalArgumentException("segmentDir must not be null");
+        }
     }
 }

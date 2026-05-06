@@ -4,6 +4,7 @@ import com.ryszardzmija.shaledb.storage.hash.segment.files.SegmentFileException;
 import com.ryszardzmija.shaledb.storage.hash.segment.files.SegmentFileFactory;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.ImmutableSegment;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.MutableSegment;
+import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentConfig;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentIOException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,19 +18,21 @@ public class RolloverHandler {
     private static final Logger logger = LoggerFactory.getLogger(RolloverHandler.class);
 
     private final SegmentFileFactory segmentFileFactory;
+    private final SegmentConfig config;
 
-    public RolloverHandler(SegmentFileFactory segmentFileFactory) {
+    public RolloverHandler(SegmentFileFactory segmentFileFactory, SegmentConfig config) {
         this.segmentFileFactory = Objects.requireNonNull(segmentFileFactory);
+        this.config = Objects.requireNonNull(config);
     }
 
     public RolloverResult rollOver(MutableSegment segment) {
         Path newSegmentPath = null;
         try {
             newSegmentPath = segmentFileFactory.createSegmentFile();
-            MutableSegment newMutableSegment = new MutableSegment(newSegmentPath);
+            MutableSegment newMutableSegment = new MutableSegment(newSegmentPath, config);
 
             try {
-                ImmutableSegment newImmutableSegment = new ImmutableSegment(segment.path());
+                ImmutableSegment newImmutableSegment = new ImmutableSegment(segment.path(), config);
                 segment.close();
                 return new RolloverResult(newMutableSegment, newImmutableSegment);
             } catch (SegmentIOException e) {

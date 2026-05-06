@@ -1,10 +1,10 @@
 package com.ryszardzmija.shaledb.storage;
 
+import com.ryszardzmija.shaledb.storage.config.StorageConfig;
 import com.ryszardzmija.shaledb.storage.hash.HashIndexEngine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -13,11 +13,11 @@ public class KeyValueStore implements AutoCloseable {
 
     private final StorageEngine storageEngine;
 
-    public KeyValueStore(Path segmentDir) {
-        Objects.requireNonNull(segmentDir);
+    public KeyValueStore(StorageConfig storageConfig) {
+        Objects.requireNonNull(storageConfig);
 
         try {
-            this.storageEngine = new HashIndexEngine(segmentDir);
+            this.storageEngine = new HashIndexEngine(storageConfig);
         } catch (StorageEngineException e) {
             logger.error("Key-value store startup failed", e);
             throw e;

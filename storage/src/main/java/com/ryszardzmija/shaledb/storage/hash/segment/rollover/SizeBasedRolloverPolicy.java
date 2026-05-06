@@ -3,10 +3,14 @@ package com.ryszardzmija.shaledb.storage.hash.segment.rollover;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.MutableSegment;
 
 public class SizeBasedRolloverPolicy implements RolloverPolicy {
-    private static final long MAX_SEGMENT_SIZE = 64*1024;  // 64KB
+    private final long maxSegmentSize;
+
+    public SizeBasedRolloverPolicy(long maxSegmentSize) {
+        this.maxSegmentSize = maxSegmentSize;
+    }
 
     @Override
     public boolean shouldRollover(MutableSegment segment) {
-        return segment.size() >= MAX_SEGMENT_SIZE;
+        return segment.size() >= maxSegmentSize;
     }
 }
