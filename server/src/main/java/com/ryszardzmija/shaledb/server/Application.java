@@ -1,9 +1,10 @@
 package com.ryszardzmija.shaledb.server;
 
+import com.ryszardzmija.shaledb.server.config.ApplicationConfigDto;
+import com.ryszardzmija.shaledb.server.config.ApplicationConfigLoader;
 import com.ryszardzmija.shaledb.storage.KeyValueStore;
 import com.ryszardzmija.shaledb.storage.config.StorageConfig;
-import com.ryszardzmija.shaledb.storage.config.StorageConfigHolder;
-import com.ryszardzmija.shaledb.storage.config.StorageConfigLoader;
+import com.ryszardzmija.shaledb.storage.config.StorageConfigMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,13 +23,15 @@ public class Application {
             configFile = args[0];
         }
 
-        StorageConfig storageConfig = StorageConfigLoader.loadFromFile(Path.of(configFile));
-        StorageConfigHolder.initialize(storageConfig);
+        ApplicationConfigLoader applicationConfigLoader = ApplicationConfigLoader.fromYAML();
+        ApplicationConfigDto applicationConfig = applicationConfigLoader.loadFromFile(Path.of(configFile));
 
-        Path segmentDir = StorageConfigHolder.get().segmentDir();
+        StorageConfigMapper storageConfigMapper = new StorageConfigMapper();
+        StorageConfig storageConfig = storageConfigMapper.toStorageConfig(applicationConfig.storage);
+
         try {
-            Files.createDirectories(segmentDir);
-            try (var store = new KeyValueStore(segmentDir)) {
+            Files.createDirectories(storageConfig.segmentDir());
+            try (var store = new KeyValueStore(storageConfig)) {
                 store.put(getBytes("Greeting"), getBytes("Hello, World!"));
                 store.put(getBytes("Answer"), getBytes("42"));
 
@@ -60,7 +63,7 @@ public class Application {
                 }
             }
         } catch (IOException e) {
-            logger.error("Failed to create segment directory {}", segmentDir, e);
+            logger.error("Failed to create segment directory {}", storageConfig.segmentDir(), e);
             System.exit(1);
         } catch (RuntimeException e) {
             logger.error("Fatal error during execution", e);

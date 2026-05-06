@@ -2,20 +2,17 @@ package com.ryszardzmija.shaledb.storage.hash;
 
 import com.ryszardzmija.shaledb.storage.StorageEngine;
 import com.ryszardzmija.shaledb.storage.StorageEngineException;
+import com.ryszardzmija.shaledb.storage.config.StorageConfig;
 import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
 import com.ryszardzmija.shaledb.storage.hash.segment.files.*;
 import com.ryszardzmija.shaledb.storage.hash.segment.loader.LoadedSegments;
 import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoader;
 import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoadingException;
-import com.ryszardzmija.shaledb.storage.hash.segment.model.ImmutableSegment;
-import com.ryszardzmija.shaledb.storage.hash.segment.model.LookupResult;
-import com.ryszardzmija.shaledb.storage.hash.segment.model.MutableSegment;
-import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentIOException;
+import com.ryszardzmija.shaledb.storage.hash.segment.model.*;
 import com.ryszardzmija.shaledb.storage.hash.segment.rollover.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.file.Path;
 import java.util.*;
 
 public class HashIndexEngine implements StorageEngine {
@@ -27,15 +24,17 @@ public class HashIndexEngine implements StorageEngine {
     private final Deque<ImmutableSegment> immutableSegments;
     private MutableSegment mutableSegment;
 
-    public HashIndexEngine(Path segmentDir) {
-        Objects.requireNonNull(segmentDir);
+    public HashIndexEngine(StorageConfig storageConfig) {
+        Objects.requireNonNull(storageConfig);
 
         try {
-            SegmentFileFactory segmentFileFactory = new SegmentFileFactory(segmentDir);
-            this.rolloverPolicy = new SizeBasedRolloverPolicy();
-            this.rolloverHandler = new RolloverHandler(segmentFileFactory);
-            SegmentFileDiscoverer segmentFileDiscoverer = new SegmentFileDiscoverer(segmentDir);
-            SegmentLoader segmentLoader = new SegmentLoader();
+            SegmentConfig segmentConfig = SegmentConfig.from(storageConfig);
+
+            SegmentFileFactory segmentFileFactory = new SegmentFileFactory(storageConfig.segmentDir());
+            this.rolloverPolicy = new SizeBasedRolloverPolicy(segmentConfig.maxSegmentSize());
+            this.rolloverHandler = new RolloverHandler(segmentFileFactory, segmentConfig);
+            SegmentFileDiscoverer segmentFileDiscoverer = new SegmentFileDiscoverer(storageConfig.segmentDir());
+            SegmentLoader segmentLoader = new SegmentLoader(segmentConfig);
 
             SegmentLayout segmentLayout = segmentFileDiscoverer.getSegmentFiles(segmentFileFactory);
             LoadedSegments loadedSegments = segmentLoader.loadSegments(segmentLayout);

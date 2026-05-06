@@ -1,6 +1,5 @@
 package com.ryszardzmija.shaledb.storage.serialization.io;
 
-import com.ryszardzmija.shaledb.storage.config.StorageConfigHolder;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
 import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordPayload;
@@ -17,9 +16,11 @@ import java.util.zip.Checksum;
 
 public class RecordReader {
     private final FileChannel readChannel;
+    private final long maxPayloadSize;
 
-    public RecordReader(FileChannel readChannel) {
+    public RecordReader(FileChannel readChannel, long maxPayloadSize) {
         this.readChannel = Objects.requireNonNull(readChannel);
+        this.maxPayloadSize = maxPayloadSize;
     }
 
     public ReadResult read(ReadRequest request) {
@@ -84,7 +85,7 @@ public class RecordReader {
     }
 
     private boolean isLengthValid(long length) {
-        return length <= StorageConfigHolder.get().maxRecordSize() - FormatInfo.getHeaderSize();
+        return length <= maxPayloadSize;
     }
 
     private boolean isChecksumValid(byte[] storedChecksum, Checksum computedChecksum) {

@@ -12,10 +12,12 @@ import java.util.Optional;
 public class SegmentReader {
     private final RecordReader recordReader;
     private final Index index;
+    private final long maxSegmentSize;
 
-    public SegmentReader(RecordReader recordReader, Index index) {
+    public SegmentReader(RecordReader recordReader, Index index, long maxSegmentSize) {
         this.recordReader = Objects.requireNonNull(recordReader);
         this.index = Objects.requireNonNull(index);
+        this.maxSegmentSize = maxSegmentSize;
     }
 
     public LookupResult get(ByteKey key) {
@@ -33,6 +35,10 @@ public class SegmentReader {
         Optional<Long> offset = index.getKeyOffset(key);
         if (offset.isEmpty()) {
             return new LookupResult.NotPresent();
+        }
+
+        if (offset.get() < 0 || offset.get() >= maxSegmentSize) {
+            throw new IllegalStateException("Invalid record offset retrieved from the index: " + offset.get());
         }
 
         ReadResult readResult = recordReader.read(new ReadRequest(offset.get()));

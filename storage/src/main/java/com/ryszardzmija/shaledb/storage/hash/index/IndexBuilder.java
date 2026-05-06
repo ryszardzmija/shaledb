@@ -14,9 +14,9 @@ public class IndexBuilder {
     private final FileChannel readChannel;
     private final RecordReader recordReader;
 
-    public IndexBuilder(FileChannel readChannel) {
+    public IndexBuilder(FileChannel readChannel, long maxPayloadSize) {
         this.readChannel = Objects.requireNonNull(readChannel);
-        this.recordReader = new RecordReader(readChannel);
+        this.recordReader = new RecordReader(readChannel, maxPayloadSize);
     }
 
     public Index build() {

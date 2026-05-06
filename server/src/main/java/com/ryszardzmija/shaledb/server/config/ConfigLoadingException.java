@@ -1,4 +1,4 @@
-package com.ryszardzmija.shaledb.storage.config;
+package com.ryszardzmija.shaledb.server.config;
 
 public class ConfigLoadingException extends RuntimeException {
     public ConfigLoadingException(String message) {

@@ -22,7 +22,7 @@ public class ImmutableSegment implements AutoCloseable {
     private final FileChannel readChannel;
     private final SegmentReader segmentReader;
 
-    public ImmutableSegment(Path path) {
+    public ImmutableSegment(Path path, SegmentConfig config) {
         this.path = Objects.requireNonNull(path);
 
         FileChannel openedReadChannel = null;
@@ -30,8 +30,8 @@ public class ImmutableSegment implements AutoCloseable {
             openedReadChannel = FileChannel.open(path, StandardOpenOption.READ);
 
             this.readChannel = openedReadChannel;
-            Index index = new IndexBuilder(readChannel).build();
-            this.segmentReader = new SegmentReader(new RecordReader(readChannel), index);
+            Index index = new IndexBuilder(readChannel, config.maxPayloadSize()).build();
+            this.segmentReader = new SegmentReader(new RecordReader(readChannel, config.maxPayloadSize()), index, config.maxSegmentSize());
         } catch (IndexBuildException | IOException e) {
             if (openedReadChannel != null) {
                 try {
