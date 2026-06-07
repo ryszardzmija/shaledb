@@ -1,7 +1,5 @@
 # ShaleDB
 
-> ShaleDB has been superseded by the Go rewrite at [ryszardzmija/shaledb-go](https://github.com/ryszardzmija/shaledb-go). New work is happening there, with the distribution layer as the main focus.
-
 <div align="center">
   <img src="assets/logo.png" alt="ShaleDB Logo" width="300"/>
   <p>
