@@ -40,8 +40,7 @@ public class FormatInfo {
 
         int payloadSize = requireRepresentablePayloadSize((long) keyLength + valueLength);
         if (payloadSize > maxPayloadSize) {
-            throw new IllegalArgumentException("Record payload size %d exceeds configured maxPayloadSize %d"
-                    .formatted(payloadSize, maxPayloadSize));
+            throw new PayloadLimitExceededException(payloadSize, maxPayloadSize);
         }
         return payloadSize;
     }
@@ -60,5 +59,11 @@ public class FormatInfo {
                     .formatted(payloadSize, maxRepresentablePayloadSize));
         }
         return (int) payloadSize;
+    }
+
+    public static final class PayloadLimitExceededException extends IllegalArgumentException {
+        private PayloadLimitExceededException(int payloadSize, long maxPayloadSize) {
+            super("Record payload size %d exceeds configured maxPayloadSize %d".formatted(payloadSize, maxPayloadSize));
+        }
     }
 }

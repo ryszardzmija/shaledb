@@ -5,6 +5,7 @@ import com.ryszardzmija.shaledb.storage.serialization.io.ReadResult;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordReader;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
+import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo.PayloadLimitExceededException;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -22,7 +23,7 @@ public class IndexBuilder {
     public Index build() {
         try {
             return createIndex();
-        } catch (RecordIOException | IOException e) {
+        } catch (RecordIOException | IOException | PayloadLimitExceededException e) {
             throw new IndexBuildException("Failed to build index", e);
         }
     }

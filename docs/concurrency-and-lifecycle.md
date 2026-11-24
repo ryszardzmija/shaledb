@@ -8,7 +8,7 @@ The implementation has a single-owner execution model. The server enforces seria
 | --- | --- |
 | Active reference, immutable deque, factory counter | `HashIndexEngine` and its factory mutate ordinary fields and an `ArrayDeque`. Switching active and publishing the old immutable takes two updates. Concurrent reads can observe an inconsistent layout. |
 | Per-segment key state | The segment reader and mutable writer share `HashIndex`. Its map and set and the two-step transitions lack synchronization. Older indexes are only read through the normal engine path after construction. |
-| File position and record contents | `RecordWriter` captures the append channel's position separately from its write loop. Two writers can capture conflicting offsets, and a sequence of short writes has no engine-level mutual exclusion. The value array is read twice during encoding. |
+| File position and record contents | `RecordWriter` queries the file size, positions the write channel at that offset and transfers the record. Two writers can observe the same size, and a sequence of short writes has no engine-level mutual exclusion. The value array is read twice during encoding. |
 | Segment read channels | A read uses positional I/O, so it need not change a shared cursor. That fact alone cannot protect an index lookup or pin the channel between lookup and use. Rollover and close can close a reader's handle. |
 | Server request execution | A single worker executes queued reads, mutations and response callbacks. This serializes those requests against each other. It gives no coordination with another store, external file access, or embedded calls on another thread. [Server architecture](server-architecture.md) |
 

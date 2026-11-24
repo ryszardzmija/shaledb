@@ -2,9 +2,9 @@ package com.ryszardzmija.shaledb.storage.serialization.io;
 
 import com.ryszardzmija.shaledb.storage.durability.DurabilityException;
 import com.ryszardzmija.shaledb.storage.durability.FileSystemSync;
-import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordPayload;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
+import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo;
 import com.ryszardzmija.shaledb.storage.serialization.spec.RecordTypeCodec;
 
 import java.io.IOException;
@@ -13,6 +13,8 @@ import java.nio.channels.FileChannel;
 import java.util.Objects;
 import java.util.zip.CRC32C;
 import java.util.zip.Checksum;
+
+import static com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException.MAX_CONSECUTIVE_ZERO_TRANSFERS;
 
 public class RecordWriter {
     private final FileChannel writeChannel;
@@ -25,6 +27,11 @@ public class RecordWriter {
         this.maxPayloadSize = maxPayloadSize;
     }
 
+    /**
+     * Appends all encoded bytes before returning their starting offset and size.
+     * Calls require serialized access to the file. A transfer failure can leave a partial record.
+     * Durability requires a separate flush.
+     */
     public WriteResult write(WriteRequest request) {
         if (request == null || request.payload() == null) {
             throw new IllegalArgumentException("Write request and record payload must not be null");
@@ -38,6 +45,10 @@ public class RecordWriter {
         byte encodedType = RecordTypeCodec.encode(recordType);
 
         try {
+            long writeOffset = writeChannel.size();
+            if (encodedRecordSize > Long.MAX_VALUE - writeOffset) {
+                throw new RecordIOException("Record end exceeds the supported file offset range at offset " + writeOffset);
+            }
             ByteBuffer buffer = ByteBuffer.allocate(encodedRecordSize).order(FormatInfo.BYTE_ORDER);
 
             ByteBuffer checksumHeaderFields = ByteBuffer.allocate(FormatInfo.getChecksumHeaderFieldsSize()).order(FormatInfo.BYTE_ORDER);
@@ -59,11 +70,10 @@ public class RecordWriter {
             buffer.put(recordPayload.value());
             buffer.flip();
 
-            WriteResult result = new WriteResult(writeChannel.position());
+            writeChannel.position(writeOffset);
+            writeFully(buffer, writeOffset);
 
-            writeFromBuffer(buffer);
-
-            return result;
+            return new WriteResult(writeOffset, encodedRecordSize);
         } catch (IOException e) {
             throw new RecordIOException("Error writing record data", e);
         }
@@ -77,9 +87,14 @@ public class RecordWriter {
         }
     }
 
-    private void writeFromBuffer(ByteBuffer buffer) throws IOException {
+    private void writeFully(ByteBuffer buffer, long writeOffset) throws IOException {
+        int consecutiveZeroWrites = 0;
         while (buffer.hasRemaining()) {
-            int _ = writeChannel.write(buffer);
+            if (writeChannel.write(buffer) > 0) {
+                consecutiveZeroWrites = 0;
+            } else if (++consecutiveZeroWrites == MAX_CONSECUTIVE_ZERO_TRANSFERS) {
+                throw new RecordIOException.NoProgress("No progress writing record at offset " + writeOffset);
+            }
         }
     }
 }

@@ -1,5 +1,10 @@
 package com.ryszardzmija.shaledb.storage.serialization.io;
 
+import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
+import com.ryszardzmija.shaledb.storage.hash.index.IndexBuildException;
+import com.ryszardzmija.shaledb.storage.hash.index.IndexBuilder;
+import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException.Section;
+import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo.PayloadLimitExceededException;
 import com.ryszardzmija.shaledb.storage.serialization.spec.TypeDecodingException;
 import org.assertj.core.api.ThrowableAssertAlternative;
 import org.junit.jupiter.api.Test;
@@ -15,8 +20,10 @@ import java.util.zip.CRC32C;
 
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static java.nio.file.StandardOpenOption.READ;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 class RecordReaderTest {
     private static final int TYPE_OFFSET = 4;
@@ -77,21 +84,23 @@ class RecordReaderTest {
     void rejectsTruncatedHeader() throws IOException {
         byte[] bytes = Arrays.copyOf(validRecord(), HEADER_SIZE - 1);
 
-        assertCorruption(bytes).withMessageContaining("Unexpected end of record data");
+        assertIncomplete(readIncomplete(bytes, 0, MAX_PAYLOAD_SIZE), Section.HEADER, 0, HEADER_SIZE, HEADER_SIZE - 1);
     }
 
     @Test
     void rejectsTruncatedKey() throws IOException {
         byte[] bytes = Arrays.copyOf(validRecord(), HEADER_SIZE + KEY_LENGTH - 1);
 
-        assertCorruption(bytes).withMessageContaining("Unexpected end of record data");
+        assertIncomplete(readIncomplete(bytes, 0, MAX_PAYLOAD_SIZE),
+                Section.PAYLOAD, 0, KEY_LENGTH + VALUE_LENGTH, KEY_LENGTH - 1);
     }
 
     @Test
     void rejectsTruncatedValue() throws IOException {
         byte[] bytes = Arrays.copyOf(validRecord(), HEADER_SIZE + KEY_LENGTH + VALUE_LENGTH - 1);
 
-        assertCorruption(bytes).withMessageContaining("Unexpected end of record data");
+        assertIncomplete(readIncomplete(bytes, 0, MAX_PAYLOAD_SIZE),
+                Section.PAYLOAD, 0, KEY_LENGTH + VALUE_LENGTH, KEY_LENGTH + VALUE_LENGTH - 1);
     }
 
     @Test
@@ -105,10 +114,35 @@ class RecordReaderTest {
 
     @Test
     void rejectsCombinedPayloadOneByteAboveConfiguredMaximum() throws IOException {
-        byte[] bytes = validRecord();
+        Path path = Files.write(tempDir.resolve("record.data"), validRecord());
 
-        assertCorruption(bytes, 0, KEY_LENGTH + VALUE_LENGTH - 1)
-                .withMessageContaining("Record payload size 5 exceeds configured maxPayloadSize 4");
+        try (FileChannel channel = FileChannel.open(path, READ)) {
+            RecordReader reader = new RecordReader(channel, KEY_LENGTH + VALUE_LENGTH - 1);
+            assertThatExceptionOfType(PayloadLimitExceededException.class)
+                    .isThrownBy(() -> reader.read(new ReadRequest(0)))
+                    .withMessageContaining("Record payload size 5 exceeds configured maxPayloadSize 4");
+            assertThatExceptionOfType(IndexBuildException.class)
+                    .isThrownBy(() -> new IndexBuilder(channel, KEY_LENGTH + VALUE_LENGTH - 1).build())
+                    .withCauseInstanceOf(PayloadLimitExceededException.class);
+        }
+    }
+
+    @Test
+    void checksTheConfiguredLimitBeforePayloadExtent() throws IOException {
+        Path path = Files.write(tempDir.resolve("record.data"), Arrays.copyOf(validRecord(), HEADER_SIZE));
+
+        try (FileChannel channel = FileChannel.open(path, READ)) {
+            assertThatExceptionOfType(PayloadLimitExceededException.class)
+                    .isThrownBy(() -> new RecordReader(channel, 4).read(new ReadRequest(0)));
+        }
+    }
+
+    @Test
+    void rejectsLargeDeclaredPayloadThatCannotFitInTheFile() throws IOException {
+        int declaredPayload = 64 * 1024 * 1024;
+        byte[] bytes = recordWithChecksum(0, 1, declaredPayload - 1, new byte[] {7});
+
+        assertIncomplete(readIncomplete(bytes, 0, declaredPayload), Section.PAYLOAD, 0, declaredPayload, 1);
     }
 
     @Test
@@ -141,16 +175,73 @@ class RecordReaderTest {
     void rejectsReadAtEndOfFile() throws IOException {
         byte[] bytes = validRecord();
 
-        assertCorruption(bytes, bytes.length, MAX_PAYLOAD_SIZE)
-                .withMessage("Data corruption detected at offset 18: Unexpected end of record data");
+        assertIncomplete(readIncomplete(bytes, bytes.length, MAX_PAYLOAD_SIZE),
+                Section.HEADER, bytes.length, HEADER_SIZE, 0);
     }
 
     @Test
     void rejectsReadBeyondEndOfFile() throws IOException {
-        byte[] bytes = validRecord();
+        Path path = Files.write(tempDir.resolve("record.data"), validRecord());
 
-        assertCorruption(bytes, bytes.length + 1L, MAX_PAYLOAD_SIZE)
-                .withMessage("Data corruption detected at offset 19: Unexpected end of record data");
+        try (FileChannel channel = FileChannel.open(path, READ)) {
+            RecordReader reader = new RecordReader(channel, MAX_PAYLOAD_SIZE);
+            assertThatIllegalArgumentException().isThrownBy(() -> reader.read(new ReadRequest(channel.size() + 1)))
+                    .withMessage("Record offset 19 is beyond file size 18");
+        }
+    }
+
+    @Test
+    void rejectsEveryTruncatedPrefixWithoutChangingFileBytes() throws IOException {
+        byte[] record = validRecord();
+        for (int size = 0; size < record.length; size++) {
+            byte[] prefix = Arrays.copyOf(record, size);
+            IncompleteRecordException failure = readIncomplete(prefix, 0, MAX_PAYLOAD_SIZE);
+            if (size < HEADER_SIZE) {
+                assertIncomplete(failure, Section.HEADER, 0, HEADER_SIZE, size);
+            } else {
+                assertIncomplete(failure, Section.PAYLOAD, 0, KEY_LENGTH + VALUE_LENGTH, size - HEADER_SIZE);
+            }
+        }
+    }
+
+    @Test
+    void scanningStopsNormallyAtAnEmptyFileOrACompleteRecordBoundary() throws IOException {
+        Path path = Files.createFile(tempDir.resolve("scan.data"));
+        ByteKey key = new ByteKey(new byte[] {1, 2, 3});
+        try (FileChannel channel = FileChannel.open(path, READ)) {
+            assertThat(new IndexBuilder(channel, MAX_PAYLOAD_SIZE).build().getKeyOffset(key)).isEmpty();
+        }
+
+        Files.write(path, validRecord());
+        try (FileChannel channel = FileChannel.open(path, READ)) {
+            assertThat(new IndexBuilder(channel, MAX_PAYLOAD_SIZE).build().getKeyOffset(key)).contains(0L);
+        }
+    }
+
+    @Test
+    void scanningFailsOnAnIncompleteSuffixAfterCompleteRecordsWithoutChangingFileBytes() throws IOException {
+        byte[] first = validRecord();
+        byte[] second = recordWithChecksum(1, 1, 0, new byte[] {6});
+        int suffixOffset = first.length + second.length;
+        for (int suffixSize : new int[] {7, HEADER_SIZE + 1}) {
+            byte[] bytes = ByteBuffer.allocate(suffixOffset + suffixSize)
+                    .put(first).put(second).put(first, 0, suffixSize).array();
+            Path path = Files.write(tempDir.resolve("scan.data"), bytes);
+
+            try (FileChannel channel = FileChannel.open(path, READ)) {
+                IndexBuilder builder = new IndexBuilder(channel, MAX_PAYLOAD_SIZE);
+                IndexBuildException failure = catchThrowableOfType(builder::build, IndexBuildException.class);
+                assertThat(failure).isNotNull();
+                if (suffixSize < HEADER_SIZE) {
+                    assertThat(failure.getCause()).isInstanceOfSatisfying(IncompleteRecordException.class,
+                            cause -> assertIncomplete(cause, Section.HEADER, suffixOffset, HEADER_SIZE, suffixSize));
+                } else {
+                    assertThat(failure.getCause()).isInstanceOfSatisfying(IncompleteRecordException.class,
+                            cause -> assertIncomplete(cause, Section.PAYLOAD, suffixOffset, KEY_LENGTH + VALUE_LENGTH, 1));
+                }
+            }
+            assertThat(Files.readAllBytes(path)).containsExactly(bytes);
+        }
     }
 
     @Test
@@ -187,11 +278,34 @@ class RecordReaderTest {
     private ThrowableAssertAlternative<DataCorruptionException> assertCorruption(
             byte[] bytes, long offset, long maxPayloadSize) throws IOException {
         Path path = Files.write(tempDir.resolve("record.data"), bytes);
+        ThrowableAssertAlternative<DataCorruptionException> failure;
         try (FileChannel channel = FileChannel.open(path, READ)) {
             RecordReader reader = new RecordReader(channel, maxPayloadSize);
             ReadRequest request = new ReadRequest(offset);
-            return assertThatExceptionOfType(DataCorruptionException.class).isThrownBy(() -> reader.read(request));
+            failure = assertThatExceptionOfType(DataCorruptionException.class).isThrownBy(() -> reader.read(request));
         }
+        assertThat(Files.readAllBytes(path)).containsExactly(bytes);
+        return failure;
+    }
+
+    private IncompleteRecordException readIncomplete(byte[] bytes, long offset, long maxPayloadSize) throws IOException {
+        Path path = Files.write(tempDir.resolve("record.data"), bytes);
+        IncompleteRecordException failure;
+        try (FileChannel channel = FileChannel.open(path, READ)) {
+            RecordReader reader = new RecordReader(channel, maxPayloadSize);
+            failure = catchThrowableOfType(() -> reader.read(new ReadRequest(offset)), IncompleteRecordException.class);
+        }
+        assertThat(Files.readAllBytes(path)).containsExactly(bytes);
+        return failure;
+    }
+
+    private static void assertIncomplete(
+            IncompleteRecordException failure, Section section, long offset, int expected, int available) {
+        assertThat(failure).isNotNull();
+        assertThat(failure.recordOffset()).isEqualTo(offset);
+        assertThat(failure.section()).isEqualTo(section);
+        assertThat(failure.expectedBytes()).isEqualTo(expected);
+        assertThat(failure.availableBytes()).isEqualTo(available);
     }
 
     private static byte[] validRecord() {

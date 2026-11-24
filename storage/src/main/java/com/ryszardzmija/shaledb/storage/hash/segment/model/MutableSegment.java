@@ -35,7 +35,7 @@ public class MutableSegment implements AutoCloseable {
         FileChannel openedWriteChannel = null;
         try {
             openedReadChannel = FileChannel.open(path, StandardOpenOption.READ);
-            openedWriteChannel = FileChannel.open(path, StandardOpenOption.APPEND);
+            openedWriteChannel = FileChannel.open(path, StandardOpenOption.WRITE);
             Index index = new IndexBuilder(openedReadChannel, segmentConfig.maxPayloadSize()).build();
 
             this.readChannel = openedReadChannel;
