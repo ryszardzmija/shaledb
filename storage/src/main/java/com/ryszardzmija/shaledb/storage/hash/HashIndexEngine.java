@@ -56,14 +56,15 @@ public class HashIndexEngine implements StorageEngine {
             SegmentFileFactory segmentFileFactory = new SegmentFileFactory(segmentDir, fileSystemSync,
                     latest == null ? 0 : latest.getKey(), channelCleanup);
             this.rolloverPolicy = new SizeBasedRolloverPolicy(segmentConfig.maxSegmentSize());
-            this.rolloverHandler = new RolloverHandler(segmentFileFactory, fileSystemSync, segmentConfig,
+            this.rolloverHandler = new RolloverHandler(segmentFileFactory, segmentConfig,
                     durabilityConfig, channelCleanup);
-            SegmentLoader segmentLoader = new SegmentLoader(segmentConfig, durabilityConfig, channelCleanup);
+            SegmentLoader segmentLoader = new SegmentLoader(segmentConfig, durabilityConfig, channelCleanup,
+                    fileSystemSync);
 
             SegmentLayout segmentLayout = latest == null
                     ? new SegmentLayout(List.of(), segmentFileFactory.createSegmentFile())
                     : new SegmentLayout(List.copyOf(discovered.headMap(latest.getKey(), false).values()), latest.getValue());
-            LoadedSegments loadedSegments = segmentLoader.loadSegments(segmentLayout);
+            LoadedSegments loadedSegments = segmentLoader.loadSegments(segmentLayout, latest != null);
             this.immutableSegments = loadedSegments.immutableSegments();
             this.mutableSegment = loadedSegments.mutableSegment();
             this.state = State.OPEN;
@@ -87,9 +88,9 @@ public class HashIndexEngine implements StorageEngine {
         if (value == null) {
             throw new IllegalArgumentException("Value must not be null");
         }
-        FormatInfo.getPayloadSize(RecordType.NORMAL, key.length, value.length, maxPayloadSize);
+        int payloadSize = FormatInfo.getPayloadSize(RecordType.NORMAL, key.length, value.length, maxPayloadSize);
         ByteKey byteKey = new ByteKey(key);
-        mutate(Operation.PUT, () -> mutableSegment.put(byteKey, value));
+        mutate(Operation.PUT, FormatInfo.getEncodedRecordSize(payloadSize), () -> mutableSegment.put(byteKey, value));
     }
 
     @Override
@@ -139,9 +140,9 @@ public class HashIndexEngine implements StorageEngine {
     public void delete(byte[] key) {
         requireOpen();
         validateKey(key);
-        FormatInfo.getPayloadSize(RecordType.TOMBSTONE, key.length, 0, maxPayloadSize);
+        int payloadSize = FormatInfo.getPayloadSize(RecordType.TOMBSTONE, key.length, 0, maxPayloadSize);
         ByteKey byteKey = new ByteKey(key);
-        mutate(Operation.DELETE, () -> mutableSegment.delete(byteKey));
+        mutate(Operation.DELETE, FormatInfo.getEncodedRecordSize(payloadSize), () -> mutableSegment.delete(byteKey));
     }
 
     @Override
@@ -193,16 +194,19 @@ public class HashIndexEngine implements StorageEngine {
         }
     }
 
-    private void mutate(Operation operation, Runnable appendAndPublish) {
-        // Caller validation is complete. Guard the append path, including setup of its write position.
-        MutationOutcome outcome = MutationOutcome.UNKNOWN;
+    private void mutate(Operation operation, int recordSize, Runnable appendAndPublish) {
+        // StorageConfig guarantees that every admitted record fits in an empty segment.
+        MutationOutcome outcome = MutationOutcome.NOT_APPENDED;
         try {
+            handleRollover(recordSize);
+            outcome = MutationOutcome.UNKNOWN;
             appendAndPublish.run();
-            outcome = MutationOutcome.FORCE_COMPLETED;
-            handleRollover();
+        } catch (SegmentFileException.IdExhausted e) {
+            // The handler reports exhaustion before retiring the current writer.
+            throw failure(operation, MutationOutcome.NOT_APPENDED, "No successor segment ID available", e);
         } catch (SegmentIOException | RolloverException e) {
-            String message = outcome == MutationOutcome.FORCE_COMPLETED
-                    ? "Rollover check or handoff failed after mutation" : "Failed to append or force mutation";
+            String message = outcome == MutationOutcome.NOT_APPENDED
+                    ? "Failed to prepare the destination segment" : "Failed to append or force mutation";
             throw terminalFailure(operation, outcome, message, e);
         } catch (RuntimeException | Error e) {
             markFailed(e);
@@ -210,19 +214,20 @@ public class HashIndexEngine implements StorageEngine {
         }
     }
 
-    private void handleRollover() {
-        if (!rolloverPolicy.shouldRollover(mutableSegment)) {
+    private void handleRollover(int recordSize) {
+        if (!rolloverPolicy.shouldRollover(mutableSegment.size(), recordSize)) {
             return;
         }
         // Reserve room before the handler can retire the active segment.
         immutableSegments.ensureCapacity(immutableSegments.size() + 1);
         RolloverResult replacement = rolloverHandler.rollOver(mutableSegment);
-        mutableSegment = replacement.newMutableSegment();
+        MutableSegment successor = replacement.newMutableSegment();
         ImmutableSegment historical = replacement.newImmutableSegment();
         try {
             immutableSegments.addFirst(historical);
         } catch (RuntimeException | Error e) {
             // Keep the successor reachable for close. The history list may never have taken ownership.
+            mutableSegment = successor;
             try {
                 historical.close();
             } catch (RuntimeException | Error closeFailure) {
@@ -230,6 +235,7 @@ public class HashIndexEngine implements StorageEngine {
             }
             throw e;
         }
+        mutableSegment = successor;
     }
 
     private StorageEngineException terminalFailure(

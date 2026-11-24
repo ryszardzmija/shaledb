@@ -5,12 +5,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Random;
+import java.util.TreeMap;
 
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.config;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.hex;
@@ -47,6 +50,7 @@ class KeyValueStoreModelTest {
         Map<String, byte[]> expected = new HashMap<>();
 
         try (var database = new ReopenableStore(config(tempDir, SMALL_SEGMENT_SIZE))) {
+            NavigableMap<Path, byte[]> previous = segmentBytes();
             for (int step = 1; step <= OPERATION_COUNT; step++) {
                 Operation operation = nextOperation(random);
                 String key = operation == Operation.REOPEN ? null : KEYS.get(random.nextInt(KEYS.size()));
@@ -79,10 +83,32 @@ class KeyValueStoreModelTest {
                 for (String candidate : KEYS) {
                     assertMatches(database.store, candidate, expected.get(candidate), context);
                 }
+                NavigableMap<Path, byte[]> current = segmentBytes();
+                assertThat(current.keySet()).as(context).containsAll(previous.keySet());
+                for (var segment : current.entrySet()) {
+                    assertThat(segment.getValue()).as("%s, size of %s", context, segment.getKey())
+                            .hasSizeLessThanOrEqualTo(SMALL_SEGMENT_SIZE);
+                    byte[] oldBytes = previous.get(segment.getKey());
+                    if (oldBytes != null && !segment.getKey().equals(current.lastKey())) {
+                        assertThat(segment.getValue()).as("%s, historical bytes of %s", context, segment.getKey())
+                                .containsExactly(oldBytes);
+                    }
+                }
+                previous = current;
             }
 
             assertThat(segmentCount(tempDir)).as("segment files after seed 0x%x", seed).isGreaterThanOrEqualTo(3);
         }
+    }
+
+    private NavigableMap<Path, byte[]> segmentBytes() throws IOException {
+        var segments = new TreeMap<Path, byte[]>();
+        try (var files = Files.newDirectoryStream(tempDir, "segment_*.log")) {
+            for (Path path : files) {
+                segments.put(path, Files.readAllBytes(path));
+            }
+        }
+        return segments;
     }
 
     private static void assertMatches(KeyValueStore store, String key, byte[] expected, String context) {

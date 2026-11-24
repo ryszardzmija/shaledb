@@ -33,7 +33,7 @@ class HashIndexEngineLifecycleTest {
         HashIndexEngine engine = open();
         Map<Path, byte[]> history;
         try {
-            // Each pair crosses the 48-byte rollover threshold.
+            // A 30-byte record cannot share a 48-byte segment with another 30-byte record.
             engine.put(HISTORICAL, new byte[16]);
             engine.put(DELETED, new byte[16]);
             engine.put(HISTORICAL, new byte[16]);
@@ -43,7 +43,7 @@ class HashIndexEngineLifecycleTest {
             engine.put(PRESENT, VALUE);
             assertContents(engine);
             history = snapshot();
-            assertThat(history).hasSize(4); // Three segment files and LOCK.
+            assertThat(history).hasSize(6); // Five segment files and LOCK.
         } finally {
             engine.close();
         }

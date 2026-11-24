@@ -53,7 +53,7 @@ The `server` module contains the application entry point, configuration loading,
 
 ## Storage design
 
-Writes are append-only. A `put` writes a normal record, while a `delete` writes a tombstone record. The mutable segment accepts new writes until it reaches the configured size limit, then ShaleDB rolls over to a new mutable segment and keeps previous segments immutable.
+Writes are append-only. A `put` writes a normal record, while a `delete` writes a tombstone record. ShaleDB checks whether each complete encoded record fits before appending it. If space is insufficient, it publishes a new mutable segment and keeps previous segments immutable.
 
 Each segment has an in-memory hash index that maps keys to offsets in the segment file. Reads check the mutable segment first, then immutable segments from newest to oldest, so the newest record for a key wins. This matters for deletes: a tombstone in a newer segment must shadow an older value.
 

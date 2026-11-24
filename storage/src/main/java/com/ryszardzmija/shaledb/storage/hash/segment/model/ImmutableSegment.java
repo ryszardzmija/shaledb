@@ -20,6 +20,14 @@ public class ImmutableSegment implements AutoCloseable {
     private final SegmentChannelCleanup channelCleanup;
     private boolean closeStarted;
 
+    ImmutableSegment(Path path, FileChannel readChannel, SegmentReader segmentReader,
+                      SegmentChannelCleanup channelCleanup) {
+        this.path = path;
+        this.readChannel = readChannel;
+        this.segmentReader = segmentReader;
+        this.channelCleanup = channelCleanup;
+    }
+
     public ImmutableSegment(Path path, SegmentConfig config, SegmentChannelCleanup channelCleanup) {
         this.path = Objects.requireNonNull(path);
         this.channelCleanup = Objects.requireNonNull(channelCleanup);

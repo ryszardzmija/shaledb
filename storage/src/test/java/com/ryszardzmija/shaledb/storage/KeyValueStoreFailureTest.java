@@ -164,20 +164,26 @@ class KeyValueStoreFailureTest {
         Path last = Files.move(segment(1), segment(Long.MAX_VALUE));
         byte[] replacement = {7, 8};
 
-        StorageConfig smallSegments = config(3, 16);
+        byte[] original = Files.readAllBytes(last);
+        StorageConfig smallSegments = config(3, 30);
         try (KeyValueStore store = new KeyValueStore(smallSegments)) {
             assertValue(store, KEY, VALUE);
             StorageEngineException failure = assertFailure(() -> store.put(KEY, replacement), Operation.PUT,
-                    Reason.SEGMENT_ID_EXHAUSTED, MutationOutcome.FORCE_COMPLETED);
+                    Reason.SEGMENT_ID_EXHAUSTED, MutationOutcome.NOT_APPENDED);
             assertThat(failure)
                     .hasRootCauseMessage("Segment IDs exhausted at " + Long.MAX_VALUE + " in " + directory);
-            assertFailed(store, failure, KEY);
+            assertThat(Files.readAllBytes(last)).containsExactly(original);
+            assertValue(store, KEY, VALUE);
+            store.put(OTHER_KEY, new byte[0]);
+            assertValue(store, OTHER_KEY, new byte[0]);
+            assertThat(Files.size(last)).isEqualTo(30);
         }
         try (var files = Files.list(directory)) {
             assertThat(files).containsExactlyInAnyOrder(last, directory.resolve("LOCK"));
         }
         try (KeyValueStore store = new KeyValueStore(smallSegments)) {
-            assertValue(store, KEY, replacement);
+            assertValue(store, KEY, VALUE);
+            assertValue(store, OTHER_KEY, new byte[0]);
         }
     }
 
@@ -275,14 +281,18 @@ class KeyValueStoreFailureTest {
             store.put(KEY, VALUE);
         }
         StorageConfig reduced = config(64, reducedThreshold);
+        byte[] previous = Files.readAllBytes(segment(1));
         try (KeyValueStore store = new KeyValueStore(reduced)) {
             assertThat(segmentCount(directory)).isEqualTo(1);
+            assertThat(Files.readAllBytes(segment(1))).containsExactly(previous);
             assertValue(store, KEY, VALUE);
             assertValue(store, OTHER_KEY, firstValue);
             assertValue(store, emptyValueKey, new byte[0]);
 
             store.put(newKey, VALUE);
             assertThat(segmentCount(directory)).isEqualTo(2);
+            assertThat(Files.readAllBytes(segment(1))).containsExactly(previous);
+            assertThat(Files.size(segment(2))).isEqualTo(HEADER_SIZE + newKey.length + VALUE.length);
             assertValue(store, KEY, VALUE);
             assertValue(store, newKey, VALUE);
         }
@@ -301,7 +311,7 @@ class KeyValueStoreFailureTest {
             assertValue(store, KEY, VALUE);
             store.put(KEY, latest);
             store.put(OTHER_KEY, VALUE);
-            assertThat(segmentCount(directory)).isEqualTo(4);
+            assertThat(segmentCount(directory)).isEqualTo(3);
             assertValue(store, KEY, latest);
             assertValue(store, OTHER_KEY, VALUE);
 
@@ -374,32 +384,38 @@ class KeyValueStoreFailureTest {
     }
 
     @Test
-    void rolloverCreationFailureReportsThatThePutForceCompleted() throws IOException {
+    void rolloverCreationConflictKeepsBothFilesAndSkipsTheIncomingPut() throws IOException {
         StorageConfig config = config(3, 16);
         try (KeyValueStore store = new KeyValueStore(config)) {
-            Files.createFile(segment(2));
+            store.put(KEY, VALUE);
+            byte[] original = Files.readAllBytes(segment(1));
+            Files.write(segment(2), original);
 
-            StorageEngineException failure = assertFailure(() -> store.put(KEY, VALUE), Operation.PUT,
-                    Reason.STORAGE_IO, MutationOutcome.FORCE_COMPLETED);
+            StorageEngineException failure = assertFailure(() -> store.put(OTHER_KEY, VALUE), Operation.PUT,
+                    Reason.STORAGE_IO, MutationOutcome.NOT_APPENDED);
             assertThat(failure).hasRootCauseInstanceOf(FileAlreadyExistsException.class);
             assertFailed(store, failure, KEY);
-            assertThat(segment(2)).isEmptyFile();
+            assertThat(Files.readAllBytes(segment(1))).containsExactly(original);
+            assertThat(Files.readAllBytes(segment(2))).containsExactly(original);
+            assertThat(segmentCount(directory)).isEqualTo(2);
         }
         try (KeyValueStore store = new KeyValueStore(config)) {
             assertValue(store, KEY, VALUE);
+            assertThat(store.get(OTHER_KEY)).isEmpty();
         }
     }
 
     @Test
-    void corruptionDuringRolloverFailsTheMutationAndCleansUpTheReplacementFile() throws IOException {
+    void retiredSegmentLookupStillDetectsCorruption() throws IOException {
         try (KeyValueStore store = new KeyValueStore(config(19, 32))) {
             store.put(KEY, VALUE);
+            store.put(OTHER_KEY, VALUE);
             overwriteByte(segment(1), HEADER_SIZE, 99);
 
-            StorageEngineException failure = assertFailure(() -> store.put(OTHER_KEY, VALUE), Operation.PUT,
-                    Reason.CHECKSUM_CORRUPTION, MutationOutcome.FORCE_COMPLETED);
+            StorageEngineException failure = assertFailure(() -> store.get(KEY), Operation.GET,
+                    Reason.CHECKSUM_CORRUPTION, MutationOutcome.NOT_APPLICABLE);
             assertThat(failure).hasRootCauseInstanceOf(DataCorruptionException.class);
-            assertThat(segment(2)).doesNotExist();
+            assertThat(failure.getCause()).hasMessageContaining(segment(1).toString());
             assertFailed(store, failure, OTHER_KEY);
         }
     }

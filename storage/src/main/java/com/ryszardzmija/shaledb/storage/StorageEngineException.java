@@ -29,7 +29,9 @@ public class StorageEngineException extends RuntimeException {
         /** An append or force failed and the engine cannot establish the persistence outcome. */
         UNKNOWN,
         /** The mutation's file force completed before a later operation failed. */
-        FORCE_COMPLETED
+        FORCE_COMPLETED,
+        /** The operation failed before the incoming record's append began. */
+        NOT_APPENDED
     }
 
     private final Operation operation;

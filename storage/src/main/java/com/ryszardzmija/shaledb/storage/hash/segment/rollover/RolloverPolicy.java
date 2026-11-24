@@ -1,7 +1,6 @@
 package com.ryszardzmija.shaledb.storage.hash.segment.rollover;
 
-import com.ryszardzmija.shaledb.storage.hash.segment.model.MutableSegment;
-
 public interface RolloverPolicy {
-    boolean shouldRollover(MutableSegment segment);
+    /** Evaluates an already admitted record against the physical size of the active segment. */
+    boolean shouldRollover(long currentSize, int recordSize);
 }
