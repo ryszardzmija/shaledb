@@ -4,7 +4,7 @@ Each open segment owns one in-memory `Index`. Its offsets are meaningful only in
 
 ## Local key state
 
-`ByteKey` copies its input, compares bytes with `Arrays.equals` (requiring the same runtime class), and hashes them with `Arrays.hashCode`. `getData()` also returns a copy. Hashing examines the key on each invocation. Distinct caller arrays with identical bytes name the same key, and subsequent mutation of a caller's array cannot break the map's hash buckets. [ByteKey](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/ByteKey.java)
+`ByteKey` owns a copy of its input and returns a copy from `getData()`. It hashes the complete byte sequence with `Arrays.hashCode` and compares it with `Arrays.equals`. Equal binary keys have equal hashes, and equality resolves collisions between distinct keys. `matches` compares decoded bytes directly with the owned copy. [ByteKey](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/ByteKey.java)
 
 `HashIndex` uses a `HashMap<ByteKey, Long>` for present keys and a `HashSet<ByteKey>` for deletions. Missing from both means no local record. `markPresent` checks that the offset is nonnegative, puts the offset and removes the deletion marker. `markDeleted` adds the marker and removes the offset. The two container changes form a single logical transition only under serialized access. [HashIndex](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/HashIndex.java)
 
@@ -19,7 +19,7 @@ stateDiagram-v2
     Deleted --> Present: later normal restores offset
 ```
 
-The index API exposes separate `isDeleted` and `getKeyOffset` calls. An empty offset covers two states. `SegmentReader.get` checks the marker first, then the offset. A tombstone hit or a local miss requires no record I/O. A present hit reads the whole record and returns its value. Repeated present lookups reread the value. [SegmentReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentReader.java) · [LookupResult](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/LookupResult.java)
+The index API exposes separate `isDeleted` and `getKeyOffset` calls. `SegmentReader.get` checks the marker first and returns `Deleted` without rereading the tombstone. Successful mutation or validated replay establishes that marker. An empty offset after the marker check yields `NotPresent`. A present entry reads and verifies the complete record on each lookup. [SegmentReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentReader.java) · [LookupResult](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/LookupResult.java)
 
 ## Live maintenance and replay
 
@@ -34,15 +34,17 @@ while offset < readChannel.size():
     offset = record.nextRecordOffset
 ```
 
-A scanner must visit even overwritten records to find the next boundary. Mutations later in a file replace that key's earlier index state. Across files, the engine probes the mutable index, then immutable indexes from highest ID to lowest. For example, if file 1 contains a value for K, file 2 deletes K, and file 3 has never seen K, file 3 yields `NotPresent` and file 2 yields `Deleted`. The engine returns absence there. If file 3 later stores a zero-byte value for K, its `Present` result ends the search there instead. The same logic serves a reconstructed index. [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java) · [Storage semantics](storage-semantics.md)
+The reader computes each next offset from the positive encoded size after checking that the complete record fits in the file. Replay follows these boundaries in append order, including overwritten records. The same sequence of successful puts and deletes therefore yields the same states and present offsets during replay and live maintenance. [RecordReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordReader.java) · [IndexBuilder](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/IndexBuilder.java)
+
+The engine probes the mutable index, then immutable indexes from highest ID to lowest. Only `NotPresent` continues the search. A newer `Deleted` result shadows all older versions, and a later reinsertion, including one with a zero-byte value, wins over the deletion. If a present record fails to read or verify, the engine reports the failure immediately. [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java) · [Storage semantics](storage-semantics.md)
 
 ## Consistency boundaries
 
 | Invariant | What enforces it and how it can fail |
 | --- | --- |
 | A key occupies exactly one local state. | Serial map/set updates maintain exclusivity. An unsynchronized observer can see a transition in progress. A force failure leaves both structures in their pre-call state even if a complete record exists. |
-| A present offset names a normal record with the indexed key. | Capture on a single exclusively owned append channel, or replay using the decoded key at its actual start, establishes the relationship. `markPresent` only checks the sign. `SegmentReader` additionally checks the configured upper bound and the record checksum. It never compares the decoded key with the request or checks the decoded type. A misdirected offset to a different valid record can silently return another value or an empty tombstone payload. This failure requires a broken index-to-file association. |
-| Indexed records are readable. | An address outside the configured offset bound reports `INVALID_RECORD_LOCATION`, even if the index was correctly rebuilt. An address inside the bound but beyond EOF reports the same reason. An address in the middle of a record usually fails type, length or checksum validation. [Segment management](segment-management.md) |
+| A present offset names a normal record with the indexed key. | Append or replay supplies the starting offset. After `RecordReader` validates structure and checksum, `SegmentReader` verifies that the type is `NORMAL` and that the decoded key matches. A wrong key or tombstone yields `INVALID_INDEX_REFERENCE` with the segment path and offset in the cause chain. Recency depends on index publication, replay order and segment order. |
+| Indexed reads require a complete record in the actual file. | A negative address or one beyond EOF reports `INVALID_RECORD_LOCATION`. An expected record at EOF reports `INCOMPLETE_RECORD` for the missing header. The reader validates both section extents and the payload budget. An otherwise valid offset remains readable at or beyond the rollover threshold. [Segment management](segment-management.md) |
 | Replay yields either a complete usable segment or a failed open. | `IndexBuilder` returns the new index only after reaching EOF at a record boundary. It wraps record and channel failures as `IndexBuildException` and retains their causes, including corruption, incomplete records and read-limit failures. This sends each failure through segment-open cleanup. In-memory deleted markers bypass rereading their tombstones, so later on-disk damage may first surface on reopen. [Concurrency and lifecycle](concurrency-and-lifecycle.md) |
 
 ## Cost and alternatives
@@ -51,4 +53,4 @@ With `S` segments, a lookup can probe all `S` indexes. Hash operations are expec
 
 Retained heap scales with the sum of distinct keys *per file*, including deleted keys, owned key bytes, hash nodes and boxed offsets. A frequently overwritten key may occupy one entry in every segment. Replay also creates transient buffers for old values that will never be returned. Local indexes keep segment loading and disposal independent. The cost grows as history is split into more files.
 
-A global key directory could retain only the current `(segment, offset)` or deletion state per key and reduce the number of probes. Building it requires an explicit replay/merge order. Reclaiming a segment or switching files would then have to coordinate every affected pointer with readers. A single tagged local entry could also consolidate the two current collections while preserving per-segment ownership. Checking identity on a present hit would localize offset errors at the cost of comparing key bytes already in the decoded record. These alternatives address different problems. [Segment lifecycle and reclamation](segment-management.md)
+A global key directory could retain only the current `(segment, offset)` or deletion state per key and reduce the number of probes. Building it requires an explicit replay/merge order. Reclaiming a segment or switching files would then have to coordinate every affected pointer with readers. [Segment lifecycle and reclamation](segment-management.md)

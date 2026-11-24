@@ -184,6 +184,7 @@ public class HashIndexEngine implements StorageEngine {
                 case RecordIOException.InvalidLocation _, ReadRequest.BeyondEnd _ -> {
                     return Reason.INVALID_RECORD_LOCATION;
                 }
+                case IndexConsistencyException _ -> { return Reason.INVALID_INDEX_REFERENCE; }
                 case SegmentFileDiscoveryException discovery when discovery.getCause() instanceof NumberFormatException -> {
                     return Reason.INVALID_SEGMENT_METADATA;
                 }

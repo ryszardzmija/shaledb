@@ -15,7 +15,8 @@ public class StorageEngineException extends RuntimeException {
         INCOMPATIBLE_RECORD_SIZE,
         INVALID_RECORD_LOCATION,
         INVALID_SEGMENT_METADATA,
-        UNSPECIFIED
+        UNSPECIFIED,
+        INVALID_INDEX_REFERENCE
     }
 
     public enum MutationOutcome {

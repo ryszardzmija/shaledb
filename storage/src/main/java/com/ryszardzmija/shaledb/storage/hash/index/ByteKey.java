@@ -13,6 +13,11 @@ public class ByteKey {
         return Arrays.copyOf(keyData, keyData.length);
     }
 
+    /** Compares decoded key bytes without exposing this key's backing array. */
+    public final boolean matches(byte[] data) {
+        return Arrays.equals(keyData, data);
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) {
@@ -25,7 +30,7 @@ public class ByteKey {
             return false;
         }
         ByteKey otherKey = (ByteKey) other;
-        return Arrays.equals(keyData, otherKey.keyData);
+        return matches(otherKey.keyData);
     }
 
     @Override

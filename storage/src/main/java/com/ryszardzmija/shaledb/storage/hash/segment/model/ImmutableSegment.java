@@ -27,7 +27,7 @@ public class ImmutableSegment implements AutoCloseable {
 
             this.readChannel = openedReadChannel;
             Index index = new IndexBuilder(readChannel, config.maxPayloadSize()).build();
-            this.segmentReader = new SegmentReader(new RecordReader(readChannel, config.maxPayloadSize()), index, config.maxSegmentSize());
+            this.segmentReader = new SegmentReader(new RecordReader(readChannel, config.maxPayloadSize()), index);
         } catch (IndexBuildException | IOException e) {
             if (openedReadChannel != null) {
                 try {
