@@ -43,11 +43,14 @@ public class SegmentLoader {
             }
 
             Path mutableSegmentPath = segmentLayout.mutableSegmentPath();
-            mutableSegment = new MutableSegment(mutableSegmentPath, segmentConfig, durabilityConfig, channelCleanup);
             if (reopening) {
-                // A discoverable file may have survived process exit before its directory force.
+                mutableSegment = MutableSegment.reopen(mutableSegmentPath, segmentConfig, durabilityConfig,
+                        channelCleanup);
+                // Force retained records and any new file length before establishing publication durability.
                 mutableSegment.sync();
                 fileSystemSync.forceDirectory(mutableSegmentPath.getParent());
+            } else {
+                mutableSegment = new MutableSegment(mutableSegmentPath, segmentConfig, durabilityConfig, channelCleanup);
             }
 
             return new LoadedSegments(immutableSegments, mutableSegment);

@@ -1,5 +1,7 @@
 package com.ryszardzmija.shaledb.storage.hash.index;
 
+import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException;
+import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException.Origin;
 import com.ryszardzmija.shaledb.storage.serialization.io.ReadRequest;
 import com.ryszardzmija.shaledb.storage.serialization.io.ReadResult;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
@@ -20,11 +22,34 @@ public class IndexBuilder {
     }
 
     public Index build() {
+        ScanResult result = scan();
+        if (result.incompleteTail() != null) {
+            throw new IndexBuildException("Incomplete record at offset " + result.validSize(), result.incompleteTail());
+        }
+        return result.index();
+    }
+
+    /** The replayed prefix, with a null incomplete tail when it reaches exact EOF. */
+    public record ScanResult(Index index, long validSize, long fileSize, IncompleteRecordException incompleteTail) {}
+
+    public ScanResult scan() {
         Index index = new HashIndex();
         long currentOffset = 0;
         try {
-            while (currentOffset < readChannel.size()) {
-                ReadResult readResult = recordReader.read(new ReadRequest(currentOffset));
+            long fileSize = readChannel.size();
+            IncompleteRecordException incompleteTail = null;
+            while (currentOffset < fileSize) {
+                ReadResult readResult;
+                try {
+                    readResult = recordReader.readWithinExtent(new ReadRequest(currentOffset), fileSize);
+                } catch (IncompleteRecordException e) {
+                    if (e.origin() != Origin.FILE_EXTENT) {
+                        throw new IndexBuildException("Unexpected EOF at record offset %d within scanned extent %d"
+                                .formatted(currentOffset, fileSize), e);
+                    }
+                    incompleteTail = e;
+                    break;
+                }
                 ByteKey key = new ByteKey(readResult.recordPayload().key());
                 if (readResult.recordType() == RecordType.TOMBSTONE) {
                     index.markDeleted(key);
@@ -33,9 +58,12 @@ public class IndexBuilder {
                 }
                 currentOffset = readResult.nextRecordOffset();
             }
-            return index;
-        } catch (ReadRequest.BeyondEnd e) {
-            throw new IndexBuildException("Segment file shrank during index rebuild at offset " + currentOffset, e);
+            long finalSize = readChannel.size();
+            if (finalSize != fileSize) {
+                throw new IOException("Segment size changed during index rebuild from %d to %d"
+                        .formatted(fileSize, finalSize));
+            }
+            return new ScanResult(index, currentOffset, fileSize, incompleteTail);
         } catch (RecordIOException | IOException e) {
             throw new IndexBuildException("Failed to build index at offset " + currentOffset, e);
         }

@@ -2,7 +2,7 @@
 
 ShaleDB stores binary keys and values in a local directory. Each change appends a record. An in-memory index for each file lets the engine find a value without replaying the log on every read. The same engine serves embedded Java callers and a small gRPC server.
 
-This guide covers the storage engine through M1.10, including exclusive ownership, fail-stop handling, and durable pre-write segment rollover. Build and run commands are in the project overview, and storage invariants are in the engineering guidelines. [Project overview](../README.md) · [Engineering guidelines](../AGENTS.md)
+This guide covers the storage engine through M1.11, including exclusive ownership, fail-stop handling, durable pre-write rollover and conservative startup recovery. Build and run commands are in the project overview, and storage invariants are in the engineering guidelines. [Project overview](../README.md) · [Engineering guidelines](../AGENTS.md)
 
 ## Reading order
 

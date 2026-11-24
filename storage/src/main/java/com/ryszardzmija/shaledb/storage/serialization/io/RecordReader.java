@@ -1,5 +1,6 @@
 package com.ryszardzmija.shaledb.storage.serialization.io;
 
+import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException.Origin;
 import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException.Section;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordPayload;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
@@ -27,10 +28,18 @@ public class RecordReader {
 
     /** Reads one expected record, including checksum verification and its next file offset. */
     public ReadResult read(ReadRequest request) {
+        try {
+            return readWithinExtent(request, readChannel.size());
+        } catch (IOException e) {
+            throw new RecordIOException("Error getting file size for record at offset: " + request.offset(), e);
+        }
+    }
+
+    /** Decodes a record against the file size captured for a sequential scan. */
+    public ReadResult readWithinExtent(ReadRequest request, long fileSize) {
         long offset = request.offset();
 
         try {
-            long fileSize = readChannel.size();
             if (offset > fileSize) {
                 throw new ReadRequest.BeyondEnd(offset, fileSize);
             }
@@ -86,7 +95,7 @@ public class RecordReader {
     private static void requireAvailable(Section section, long recordOffset, int expected, long available) {
         if (available < expected) {
             // The extent checks guarantee 0 <= available < expected <= Integer.MAX_VALUE.
-            throw new IncompleteRecordException(section, recordOffset, expected, (int) available);
+            throw new IncompleteRecordException(section, Origin.FILE_EXTENT, recordOffset, expected, (int) available);
         }
     }
 
@@ -97,7 +106,8 @@ public class RecordReader {
             if (bytesRead > 0) {
                 consecutiveZeroReads = 0;
             } else if (bytesRead == -1) {
-                throw new IncompleteRecordException(section, recordOffset, buffer.limit(), buffer.position());
+                throw new IncompleteRecordException(
+                        section, Origin.TRANSFER_EOF, recordOffset, buffer.limit(), buffer.position());
             } else if (++consecutiveZeroReads == MAX_CONSECUTIVE_ZERO_TRANSFERS) {
                 throw new RecordIOException.NoProgress("No progress reading record %s at offset %d"
                         .formatted(section, recordOffset));
@@ -109,7 +119,10 @@ public class RecordReader {
         try {
             return FormatInfo.getPayloadSize(type, keyLength, valueLength, maxPayloadSize);
         } catch (FormatInfo.PayloadLimitExceededException e) {
-            throw new RecordIOException.ReadLimitExceeded(offset, e);
+            if (e.limit() == FormatInfo.PayloadLimitExceededException.Limit.CONFIGURED) {
+                throw new RecordIOException.ReadLimitExceeded(offset, e);
+            }
+            throw new DataCorruptionException(e.getMessage(), offset, e);
         } catch (IllegalArgumentException e) {
             throw new DataCorruptionException(e.getMessage(), offset, e);
         }

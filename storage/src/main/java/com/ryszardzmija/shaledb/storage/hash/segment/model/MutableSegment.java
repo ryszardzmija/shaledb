@@ -33,6 +33,17 @@ public class MutableSegment implements AutoCloseable {
 
     public MutableSegment(Path path, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig,
                           SegmentChannelCleanup channelCleanup) {
+        this(path, segmentConfig, durabilityConfig, channelCleanup, false);
+    }
+
+    /** Reopens the discovered active segment after the loader has validated historical segments. */
+    public static MutableSegment reopen(Path path, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig,
+                                        SegmentChannelCleanup channelCleanup) {
+        return new MutableSegment(path, segmentConfig, durabilityConfig, channelCleanup, true);
+    }
+
+    private MutableSegment(Path path, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig,
+                           SegmentChannelCleanup channelCleanup, boolean reopening) {
         this.path = Objects.requireNonNull(path);
         this.channelCleanup = Objects.requireNonNull(channelCleanup);
 
@@ -41,7 +52,8 @@ public class MutableSegment implements AutoCloseable {
         try {
             openedReadChannel = FileChannel.open(path, StandardOpenOption.READ);
             openedWriteChannel = FileChannel.open(path, StandardOpenOption.WRITE);
-            Index index = new IndexBuilder(openedReadChannel, segmentConfig.maxPayloadSize()).build();
+            IndexBuilder indexBuilder = new IndexBuilder(openedReadChannel, segmentConfig.maxPayloadSize());
+            Index index = reopening ? recoverIndex(indexBuilder, openedWriteChannel) : indexBuilder.build();
 
             this.readChannel = openedReadChannel;
             this.writeChannel = openedWriteChannel;
@@ -64,6 +76,31 @@ public class MutableSegment implements AutoCloseable {
             }
             throw (Error) e;
         }
+    }
+
+    private Index recoverIndex(IndexBuilder indexBuilder, FileChannel writer) {
+        IndexBuilder.ScanResult scan = indexBuilder.scan();
+        long boundary = scan.validSize();
+        String operation = "verify the scanned extent of";
+        try {
+            long writerSize = writer.size();
+            if (writerSize != scan.fileSize()) {
+                throw new IOException("Write channel size %d differs from scanned size %d"
+                        .formatted(writerSize, scan.fileSize()));
+            }
+            if (scan.incompleteTail() != null) {
+                operation = "truncate and verify";
+                writer.truncate(boundary);
+                long recoveredSize = writer.size();
+                if (recoveredSize != boundary) {
+                    throw new IOException("Segment size after truncation is " + recoveredSize);
+                }
+            }
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
+            throw new SegmentIOException("Failed to %s active segment %s at validated boundary %d"
+                    .formatted(operation, path, boundary), e);
+        }
+        return scan.index();
     }
 
     public LookupResult get(ByteKey key) {

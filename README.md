@@ -11,7 +11,7 @@
 
 ## Overview
 
-ShaleDB is a persistent key-value store written in Java. It implements a local storage engine with append-only segment files, in-memory hash indexes, CRC32C-validated records, tombstone deletes, size-based segment rollover, startup index rebuilds, and validated YAML configuration. The store is also available through a small gRPC API for `Get`, `Put`, and `Delete`.
+ShaleDB is a persistent key-value store written in Java. It implements a local storage engine with append-only segment files, in-memory hash indexes, CRC32C-validated records, tombstone deletes, size-based segment rollover, startup index rebuilds, conservative startup recovery, and validated YAML configuration. The store is also available through a small gRPC API for `Get`, `Put`, and `Delete`.
 
 ## Building and running
 
@@ -59,7 +59,7 @@ Each segment has an in-memory hash index that maps keys to offsets in the segmen
 
 Records include a CRC32C checksum, record type, key length, value length, key bytes, and value bytes. Reads, writes, and startup index rebuilds enforce the same record structure and payload limit. The engine rejects invalid mutations before append, and reads check for truncated records and checksum mismatches.
 
-The current durability mode is `SYNC_EACH_WRITE`. Each write is flushed before the in-memory index is updated, which gives the engine a simple recovery boundary.
+The current durability mode is `SYNC_EACH_WRITE`. Each write is flushed before the in-memory index is updated, and startup can recover supported interrupted appends in the active segment. [Durability and recovery](docs/durability-and-recovery.md)
 
 ## Configuration
 
