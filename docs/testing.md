@@ -4,6 +4,12 @@ ShaleDB builds with Bazel 9.1.0 and Java language level 25. Bzlmod supplies Java
 
 GitHub Actions runs the root target on pushes and pull requests on `ubuntu-latest` with Temurin 25, Bazelisk and build/repository caches. This describes the checked-in workflow. The results below are from local execution. [CI workflow](../.github/workflows/ci.yaml) · [Storage tests build](../storage/BUILD.bazel) · [Server tests build](../server/BUILD.bazel)
 
+## Lifecycle coverage for M1.08
+
+- Real-file tests exercise failed and closed operation guards, validation order, the first terminal cause, ownership across failure and multiple rollovers, and unchanged segment bytes after close and reopen. [HashIndexEngineLifecycleTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngineLifecycleTest.java)
+- Startup fault tests check that a failed second channel open closes the first, a corrupt historical file closes all real channels opened so far, and a close error can remain visible without blocking a new owner when the channel is already closed. [KeyValueStoreIoFailureTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/KeyValueStoreIoFailureTest.java)
+- Cleanup fault tests check that independent closes continue, primary and suppressed errors survive, the directory remains locked while a writer stays open, and later close attempts retry only the outstanding writer. Rollover tests exercise cleanup of unpublished views and the terminal transition when retirement of the installed active fails. Ownership tests cover repeated reporting after uncertain native release. [KeyValueStoreIoFailureTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/KeyValueStoreIoFailureTest.java) · [DatabaseLockTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/hash/DatabaseLockTest.java)
+
 ## Execution for M1.07
 
 | Bazel invocation | Baseline | With M1.07 |

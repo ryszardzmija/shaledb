@@ -235,7 +235,8 @@ class DatabaseLockTest {
         assertThat(failure.operation()).isEqualTo(Operation.CLOSE);
         assertThat(failure.reason()).isEqualTo(Reason.OWNERSHIP_IO);
         assertThat(releaseFailure.getSuppressed()).containsExactly(closeFailure);
-        ownership.close();
+        assertThat(catchThrowableOfType(ownership::close, StorageEngineException.class))
+                .isNotNull().hasCause(releaseFailure).isNotSameAs(failure);
         verify(lock).release();
         verify(channel).close();
         openFailure(Reason.DATABASE_LOCKED);
