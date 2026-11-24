@@ -40,7 +40,7 @@ public class RecordReader {
             int keyDataSize = headerBuffer.getInt();
             int valueDataSize = headerBuffer.getInt();
 
-            if (!isLengthValid((long) keyDataSize + valueDataSize)) {
+            if (!arePayloadLengthsValid(keyDataSize, valueDataSize)) {
                 throw new DataCorruptionException("Retrieved record length is invalid", offset);
             }
 
@@ -84,8 +84,8 @@ public class RecordReader {
         }
     }
 
-    private boolean isLengthValid(long length) {
-        return length <= maxPayloadSize;
+    private boolean arePayloadLengthsValid(int keyDataSize, int valueDataSize) {
+        return keyDataSize > 0 && valueDataSize >= 0 && (long) keyDataSize + valueDataSize <= maxPayloadSize;
     }
 
     private boolean isChecksumValid(byte[] storedChecksum, Checksum computedChecksum) {
