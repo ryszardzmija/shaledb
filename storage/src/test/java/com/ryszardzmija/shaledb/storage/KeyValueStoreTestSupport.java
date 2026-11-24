@@ -6,16 +6,24 @@ import com.ryszardzmija.shaledb.storage.StorageEngineException.Reason;
 import com.ryszardzmija.shaledb.storage.config.StorageConfig;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityMode;
 import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo;
+import org.mockito.MockedStatic;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HexFormat;
+import java.util.Set;
 import java.util.regex.Pattern;
 
+import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
+import static java.nio.file.StandardOpenOption.CREATE;
+import static java.nio.file.StandardOpenOption.WRITE;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
+import static org.mockito.Mockito.mockStatic;
 
 final class KeyValueStoreTestSupport {
     private static final HexFormat HEX = HexFormat.of();
@@ -54,6 +62,21 @@ final class KeyValueStoreTestSupport {
         assertThat(failure.reason()).isEqualTo(reason);
         assertThat(failure.mutationOutcome()).isEqualTo(outcome);
         return failure;
+    }
+
+    static void assertFailed(KeyValueStore store, Throwable failure, byte[] key) {
+        assertThatIllegalStateException().isThrownBy(() -> store.get(key)).withCause(failure);
+        assertThatIllegalStateException().isThrownBy(() -> store.put(key, new byte[0])).withCause(failure);
+        assertThatIllegalStateException().isThrownBy(() -> store.delete(key)).withCause(failure);
+    }
+
+    static MockedStatic<FileChannel> mockChannels(Path directory) {
+        Path lockPath = directory.resolve("LOCK");
+        MockedStatic<FileChannel> channels = mockStatic(FileChannel.class);
+        channels.when(() -> FileChannel.open(lockPath, WRITE, CREATE, NOFOLLOW_LINKS))
+                .thenAnswer(call -> lockPath.getFileSystem().provider().newFileChannel(lockPath,
+                        Set.of(WRITE, CREATE, NOFOLLOW_LINKS)));
+        return channels;
     }
 
     static byte[] invalidHeader() {

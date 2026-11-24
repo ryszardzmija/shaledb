@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertValue;
@@ -110,6 +111,31 @@ class KeyValueStoreValidationTest {
             assertThatIllegalArgumentException().isThrownBy(() -> store.delete(new byte[MAX_PAYLOAD_SIZE + 1]));
             assertThat(segmentContents()).isEqualTo(before);
             assertThat(store.get(deleted)).isEmpty();
+        }
+    }
+
+    @Test
+    void argumentRejectionPreservesContentsAndAllowsTheNextMutation() throws IOException {
+        byte[] key = hex("01");
+        byte[] value = hex("80ff");
+        byte[] later = hex("02");
+        try (var store = new KeyValueStore(config(64))) {
+            store.put(key, value);
+
+            for (Runnable invalid : List.<Runnable>of(
+                    () -> store.put(null, value),
+                    () -> store.get(new byte[0]),
+                    () -> store.delete(null),
+                    () -> store.put(key, null),
+                    () -> store.put(key, new byte[MAX_PAYLOAD_SIZE]),
+                    () -> store.delete(new byte[MAX_PAYLOAD_SIZE + 1]))) {
+                var before = segmentContents();
+                assertThatIllegalArgumentException().isThrownBy(invalid::run);
+                assertThat(segmentContents()).isEqualTo(before);
+                assertValue(store, key, value);
+                store.put(later, new byte[0]);
+                assertValue(store, later, new byte[0]);
+            }
         }
     }
 

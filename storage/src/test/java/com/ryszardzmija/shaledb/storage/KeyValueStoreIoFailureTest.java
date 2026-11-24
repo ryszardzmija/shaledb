@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
+import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertFailed;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertFailure;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.invalidHeader;
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
@@ -33,14 +34,15 @@ import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class KeyValueStoreIoFailureTest {
@@ -71,13 +73,18 @@ class KeyValueStoreIoFailureTest {
             when(reader.read(any(ByteBuffer.class), eq(0L))).thenThrow(readFailure);
 
             assertThat(store.get(new byte[] {3})).isEmpty();
-            assertThat(assertFailure(() -> store.get(KEY), Operation.GET, Reason.STORAGE_IO, MutationOutcome.NOT_APPLICABLE))
-                    .hasRootCause(readFailure);
+            StorageEngineException failure = assertFailure(() -> store.get(KEY), Operation.GET, Reason.STORAGE_IO,
+                    MutationOutcome.NOT_APPLICABLE);
+            assertThat(failure).hasRootCause(readFailure);
+            clearInvocations(reader, writer);
+            assertFailed(store, failure, KEY);
+            assertFailed(store, failure, new byte[] {3});
+            verifyNoInteractions(reader, writer);
         }
     }
 
     @Test
-    void partialAppendFailurePreservesTheCauseAndSkipsForceAndPublication() throws IOException {
+    void partialAppendFailurePreservesTheCauseAndSkipsForce() throws IOException {
         IOException writeFailure = new IOException("failed append");
         when(writer.write(any(ByteBuffer.class))).thenAnswer(call -> {
             ByteBuffer buffer = call.getArgument(0);
@@ -89,15 +96,16 @@ class KeyValueStoreIoFailureTest {
             assertThatIllegalArgumentException().isThrownBy(() -> store.put(KEY, null));
             verify(writer, never()).write(any(ByteBuffer.class));
 
-            assertThat(assertFailure(() -> store.put(KEY, VALUE), Operation.PUT, Reason.STORAGE_IO, MutationOutcome.UNKNOWN))
-                    .hasRootCause(writeFailure);
+            StorageEngineException failure = assertFailure(() -> store.put(KEY, VALUE), Operation.PUT, Reason.STORAGE_IO,
+                    MutationOutcome.UNKNOWN);
+            assertThat(failure).hasRootCause(writeFailure);
             verify(writer, never()).force(true);
-            assertThat(store.get(KEY)).isEmpty();
+            assertFailed(store, failure, KEY);
         }
     }
 
     @Test
-    void failedDeleteForceLeavesPersistenceUncertainAndDoesNotPublishTheTombstone() throws IOException {
+    void failedDeleteForceReportsUncertainPersistenceAndDisablesOperations() throws IOException {
         IOException forceFailure = new IOException("failed force");
         completeWrites();
         try (KeyValueStore store = openWithChannels()) {
@@ -110,10 +118,9 @@ class KeyValueStoreIoFailureTest {
             assertThat(failure.getCause().getCause().getCause())
                     .isInstanceOfSatisfying(DurabilityException.class,
                             cause -> assertThat(cause.target()).isEqualTo(DurabilityException.Target.FILE));
-            // The original indexed record still drives the lookup, so it tries to read its header.
-            when(reader.size()).thenThrow(new IOException("indexed record requires I/O"));
-            assertFailure(() -> store.get(KEY), Operation.GET, Reason.STORAGE_IO, MutationOutcome.NOT_APPLICABLE);
+            assertFailed(store, failure, KEY);
         }
+        verify(writer, times(2)).force(true);
     }
 
     @Test
@@ -123,10 +130,11 @@ class KeyValueStoreIoFailureTest {
         try (KeyValueStore store = openWithChannels()) {
             when(reader.size()).thenThrow(sizeFailure);
 
-            assertThat(assertFailure(() -> store.delete(KEY), Operation.DELETE, Reason.STORAGE_IO,
-                    MutationOutcome.FORCE_COMPLETED)).hasRootCause(sizeFailure);
+            StorageEngineException failure = assertFailure(() -> store.delete(KEY), Operation.DELETE, Reason.STORAGE_IO,
+                    MutationOutcome.FORCE_COMPLETED);
+            assertThat(failure).hasRootCause(sizeFailure);
             verify(writer).force(true);
-            assertThat(store.get(KEY)).isEmpty();
+            assertFailed(store, failure, KEY);
         }
     }
 
@@ -162,6 +170,7 @@ class KeyValueStoreIoFailureTest {
                 assertThat(cleanup[1]).isInstanceOf(DurabilityException.class).hasCause(directoryForceFailure);
                 verify(replacementWriter).close();
                 assertThat(replacement).doesNotExist();
+                assertFailed(store, failure, KEY);
             }
         }
     }
@@ -192,6 +201,7 @@ class KeyValueStoreIoFailureTest {
                 verify(writer, never()).close();
                 assertThat(replacement).doesNotExist();
                 assertThat(active).isRegularFile();
+                assertFailed(store, failure, KEY);
                 assertLocked();
             }
         }
@@ -398,6 +408,15 @@ class KeyValueStoreIoFailureTest {
 
     @Test
     void repeatedCloseRetriesOnlyOutstandingChannelsAndReleasesOwnershipWhenSafe() throws IOException {
+        assertRepeatedClose(false);
+    }
+
+    @Test
+    void repeatedCloseAfterFailedAppendRetainsOwnershipAndSkipsForce() throws IOException {
+        assertRepeatedClose(true);
+    }
+
+    private void assertRepeatedClose(boolean failAppend) throws IOException {
         Path oldest = createSegment(1);
         Path newer = createSegment(2);
         Path active = createSegment(3);
@@ -419,6 +438,15 @@ class KeyValueStoreIoFailureTest {
             store = open();
         }
 
+        if (failAppend) {
+            IOException appendFailure = new IOException("append failed before cleanup started");
+            when(writer.write(any(ByteBuffer.class))).thenThrow(appendFailure);
+            StorageEngineException failedPut = assertFailure(() -> store.put(KEY, VALUE), Operation.PUT,
+                    Reason.STORAGE_IO, MutationOutcome.UNKNOWN);
+            assertThat(failedPut).hasRootCause(appendFailure);
+            assertFailed(store, failedPut, KEY);
+        }
+
         StorageEngineException first = assertFailure(store::close, Operation.CLOSE,
                 Reason.STORAGE_IO, MutationOutcome.NOT_APPLICABLE);
         assertThat(first).hasRootCause(activeFailure);
@@ -437,7 +465,7 @@ class KeyValueStoreIoFailureTest {
             assertThat(reopened.get(KEY)).isEmpty();
         }
         verify(writer, times(3)).close();
-        verify(writer).force(true);
+        verify(writer, times(failAppend ? 0 : 1)).force(true);
         verify(reader).close();
         verify(newerReader).close();
         verify(oldestReader).close();
@@ -606,12 +634,7 @@ class KeyValueStoreIoFailureTest {
     }
 
     private MockedStatic<FileChannel> mockChannels() {
-        Path lockPath = directory.resolve("LOCK");
-        MockedStatic<FileChannel> channels = mockStatic(FileChannel.class);
-        channels.when(() -> FileChannel.open(lockPath, WRITE, CREATE, NOFOLLOW_LINKS))
-                .thenAnswer(call -> lockPath.getFileSystem().provider().newFileChannel(lockPath,
-                        Set.of(WRITE, CREATE, NOFOLLOW_LINKS)));
-        return channels;
+        return KeyValueStoreTestSupport.mockChannels(directory);
     }
 
     private FileLock stubOwnershipLock(MockedStatic<FileChannel> channels) throws IOException {

@@ -71,7 +71,7 @@ sequenceDiagram
     E-->>C: Return on normal completion
 ```
 
-Both mutations append even when the logical state already matches the request. The order of append, force and publication is explicit. The size check and possible index rebuild during rollover are also on the caller's path. A failure there reaches the caller with the triggering mutation's force already completed. [Storage semantics](storage-semantics.md) · [Durability and recovery](durability-and-recovery.md)
+Both mutations append even when the logical state already matches the request. The engine guards the path from segment append through force, index publication, the size check and any rollover. Failures there disable normal operations before control returns to the caller. A size check or rollover failure occurs after the triggering record's force completed. [Fail-stop policy](storage-semantics.md#fail-stop-policy) · [Durability and recovery](durability-and-recovery.md)
 
 ## Get
 
@@ -103,7 +103,7 @@ sequenceDiagram
     E-->>C: Optional value, empty or storage exception
 ```
 
-Only an absent local entry permits the search to continue. A deletion marker terminates the search with absence, and a failed present read terminates it with a storage exception. [Indexing](indexing.md)
+Only an absent local entry permits the search to continue. A deletion marker terminates the search with absence. An unreadable or inconsistent indexed record terminates lookup with its original failure and sends the engine to `FAILED`. [Indexing](indexing.md) · [Fail-stop policy](storage-semantics.md#fail-stop-policy)
 
 ## Design decisions and trade-offs
 

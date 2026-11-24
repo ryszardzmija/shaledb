@@ -29,6 +29,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Arrays;
 
+import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertFailed;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertFailure;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertValue;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.invalidHeader;
@@ -166,10 +167,11 @@ class KeyValueStoreFailureTest {
         StorageConfig smallSegments = config(3, 16);
         try (KeyValueStore store = new KeyValueStore(smallSegments)) {
             assertValue(store, KEY, VALUE);
-            assertThat(assertFailure(() -> store.put(KEY, replacement), Operation.PUT,
-                    Reason.SEGMENT_ID_EXHAUSTED, MutationOutcome.FORCE_COMPLETED))
+            StorageEngineException failure = assertFailure(() -> store.put(KEY, replacement), Operation.PUT,
+                    Reason.SEGMENT_ID_EXHAUSTED, MutationOutcome.FORCE_COMPLETED);
+            assertThat(failure)
                     .hasRootCauseMessage("Segment IDs exhausted at " + Long.MAX_VALUE + " in " + directory);
-            assertValue(store, KEY, replacement);
+            assertFailed(store, failure, KEY);
         }
         try (var files = Files.list(directory)) {
             assertThat(files).containsExactlyInAnyOrder(last, directory.resolve("LOCK"));
@@ -191,39 +193,72 @@ class KeyValueStoreFailureTest {
             StorageEngineException failure = assertFailure(() -> store.get(KEY), Operation.GET,
                     Reason.CHECKSUM_CORRUPTION, MutationOutcome.NOT_APPLICABLE);
             assertThat(failure).hasRootCauseInstanceOf(DataCorruptionException.class);
+            assertFailed(store, failure, KEY);
         }
     }
 
     @Test
-    void indexedReadRejectsAnIncompleteRecordAndOffsetsAtOrBeyondEof() throws IOException {
+    void indexedReadFailsStopOnInvalidRecordStructure() throws IOException {
+        try (KeyValueStore store = new KeyValueStore(config(128, 256))) {
+            store.put(KEY, VALUE);
+            overwriteByte(segment(1), FormatInfo.CHECKSUM_FIELD_SIZE, 99);
+
+            StorageEngineException failure = assertFailure(() -> store.get(KEY), Operation.GET,
+                    Reason.STRUCTURAL_CORRUPTION, MutationOutcome.NOT_APPLICABLE);
+            assertThat(failure).hasRootCauseInstanceOf(TypeDecodingException.class);
+            assertFailed(store, failure, KEY);
+        }
+    }
+
+    @Test
+    void indexedReadFailsStopOnIncompletePayload() throws IOException {
+        assertIncompleteIndexedRecord(HEADER_SIZE + 1, Section.PAYLOAD, 1);
+    }
+
+    @Test
+    void indexedReadFailsStopWhenAnExpectedRecordStartsAtEof() throws IOException {
+        assertIncompleteIndexedRecord(0, Section.HEADER, 0);
+    }
+
+    private void assertIncompleteIndexedRecord(int retainedBytes, Section section, int available) throws IOException {
         try (KeyValueStore store = new KeyValueStore(config(128, 256))) {
             store.put(OTHER_KEY, new byte[0]);
             long recordOffset = Files.size(segment(1));
             store.put(KEY, VALUE);
+            truncateActive(recordOffset + retainedBytes);
 
-            try (FileChannel channel = FileChannel.open(segment(1), WRITE)) {
-                channel.truncate(recordOffset + HEADER_SIZE + 1);
-                StorageEngineException incomplete = assertFailure(() -> store.get(KEY), Operation.GET,
-                        Reason.INCOMPLETE_RECORD, MutationOutcome.NOT_APPLICABLE);
-                assertThat(incomplete.getCause().getCause()).isInstanceOfSatisfying(IncompleteRecordException.class,
-                        cause -> assertThat(cause.recordOffset()).isEqualTo(recordOffset));
+            StorageEngineException failure = assertFailure(() -> store.get(KEY), Operation.GET,
+                    Reason.INCOMPLETE_RECORD, MutationOutcome.NOT_APPLICABLE);
+            assertThat(failure.getCause().getCause()).isInstanceOfSatisfying(IncompleteRecordException.class, cause -> {
+                assertThat(cause.recordOffset()).isEqualTo(recordOffset);
+                assertThat(cause.section()).isEqualTo(section);
+                assertThat(cause.availableBytes()).isEqualTo(available);
+            });
+            assertFailed(store, failure, KEY);
+        }
+    }
 
-                channel.truncate(recordOffset);
-                StorageEngineException atEof = assertFailure(() -> store.get(KEY), Operation.GET,
-                        Reason.INCOMPLETE_RECORD, MutationOutcome.NOT_APPLICABLE);
-                assertThat(atEof.getCause().getCause()).isInstanceOfSatisfying(IncompleteRecordException.class, cause -> {
-                    assertThat(cause.recordOffset()).isEqualTo(recordOffset);
-                    assertThat(cause.section()).isEqualTo(Section.HEADER);
-                    assertThat(cause.availableBytes()).isZero();
-                });
+    @Test
+    void indexedReadFailsStopWhenAnExpectedRecordStartsBeyondEof() throws IOException {
+        try (KeyValueStore store = new KeyValueStore(config(128, 256))) {
+            store.put(OTHER_KEY, new byte[0]);
+            long recordOffset = Files.size(segment(1));
+            store.put(KEY, VALUE);
+            truncateActive(recordOffset - 1);
 
-                channel.truncate(recordOffset - 1);
-                StorageEngineException invalid = assertFailure(() -> store.get(KEY), Operation.GET,
-                        Reason.INVALID_RECORD_LOCATION, MutationOutcome.NOT_APPLICABLE);
-                assertThat(invalid.getCause().getCause()).isInstanceOfSatisfying(RecordIOException.InvalidLocation.class,
-                        cause -> assertThat(cause.recordOffset()).isEqualTo(recordOffset));
-                assertThat(invalid).hasRootCauseInstanceOf(ReadRequest.BeyondEnd.class);
-            }
+            StorageEngineException failure = assertFailure(() -> store.get(KEY), Operation.GET,
+                    Reason.INVALID_RECORD_LOCATION, MutationOutcome.NOT_APPLICABLE);
+            assertThat(failure.getCause().getCause()).isInstanceOfSatisfying(RecordIOException.InvalidLocation.class,
+                    cause -> assertThat(cause.recordOffset()).isEqualTo(recordOffset));
+            assertThat(failure).hasRootCauseInstanceOf(ReadRequest.BeyondEnd.class);
+            assertFailed(store, failure, KEY);
+        }
+    }
+
+    private void truncateActive(long extent) throws IOException {
+        // Deliberate external modification models corruption of bytes expected by the live index.
+        try (FileChannel channel = FileChannel.open(segment(1), WRITE)) {
+            channel.truncate(extent);
         }
     }
 
@@ -278,6 +313,43 @@ class KeyValueStoreFailureTest {
             assertThat(failure.getCause()).hasMessageContaining(segment(2).toString());
             assertThat(failure.getCause().getCause()).isInstanceOfSatisfying(IndexConsistencyException.class,
                     cause -> assertThat(cause.recordOffset()).isZero());
+            assertFailed(store, failure, KEY);
+            assertFailed(store, failure, OTHER_KEY);
+        }
+    }
+
+    @Test
+    void indexedReadFailsStopWhenAPresentReferenceIdentifiesAValidTombstone() throws IOException {
+        Path fixture = Files.createTempDirectory(directory, "tombstone");
+        try (KeyValueStore writer = new KeyValueStore(KeyValueStoreTestSupport.config(fixture, 256))) {
+            writer.delete(KEY);
+        }
+        try (KeyValueStore store = new KeyValueStore(config(128, 256))) {
+            store.put(KEY, VALUE);
+            // Replace a normal record with a checksum-valid tombstone without changing the live index.
+            Files.write(segment(1), Files.readAllBytes(fixture.resolve(segment(1).getFileName())));
+            StorageEngineException failure = assertFailure(() -> store.get(KEY), Operation.GET,
+                    Reason.INVALID_INDEX_REFERENCE, MutationOutcome.NOT_APPLICABLE);
+            assertThat(failure.getCause().getCause()).isInstanceOfSatisfying(IndexConsistencyException.class,
+                    cause -> assertThat(cause).hasMessageContaining("TOMBSTONE"));
+            assertFailed(store, failure, KEY);
+        }
+    }
+
+    @Test
+    void indexedReadFailsStopWhenTheRecordExceedsTheConfiguredReadLimit() throws IOException {
+        Path fixture = Files.createTempDirectory(directory, "large-record");
+        try (KeyValueStore writer = new KeyValueStore(KeyValueStoreTestSupport.config(fixture, 256))) {
+            writer.put(KEY, new byte[8]);
+        }
+        try (KeyValueStore store = new KeyValueStore(config(3, 256))) {
+            store.put(KEY, VALUE);
+            Files.write(segment(1), Files.readAllBytes(fixture.resolve(segment(1).getFileName())));
+            StorageEngineException failure = assertFailure(() -> store.get(KEY), Operation.GET,
+                    Reason.INCOMPATIBLE_RECORD_SIZE, MutationOutcome.NOT_APPLICABLE);
+            assertThat(failure.getCause().getCause()).isInstanceOf(RecordIOException.ReadLimitExceeded.class);
+            assertThat(failure).hasRootCauseInstanceOf(PayloadLimitExceededException.class);
+            assertFailed(store, failure, KEY);
         }
     }
 
@@ -297,6 +369,7 @@ class KeyValueStoreFailureTest {
                     Reason.CHECKSUM_CORRUPTION, MutationOutcome.NOT_APPLICABLE);
             assertThat(failure.getCause()).hasMessageContaining(segment(2).toString());
             assertThat(failure).hasRootCauseInstanceOf(DataCorruptionException.class);
+            assertFailed(store, failure, KEY);
         }
     }
 
@@ -309,7 +382,8 @@ class KeyValueStoreFailureTest {
             StorageEngineException failure = assertFailure(() -> store.put(KEY, VALUE), Operation.PUT,
                     Reason.STORAGE_IO, MutationOutcome.FORCE_COMPLETED);
             assertThat(failure).hasRootCauseInstanceOf(FileAlreadyExistsException.class);
-            assertValue(store, KEY, VALUE);
+            assertFailed(store, failure, KEY);
+            assertThat(segment(2)).isEmptyFile();
         }
         try (KeyValueStore store = new KeyValueStore(config)) {
             assertValue(store, KEY, VALUE);
@@ -326,7 +400,7 @@ class KeyValueStoreFailureTest {
                     Reason.CHECKSUM_CORRUPTION, MutationOutcome.FORCE_COMPLETED);
             assertThat(failure).hasRootCauseInstanceOf(DataCorruptionException.class);
             assertThat(segment(2)).doesNotExist();
-            assertValue(store, OTHER_KEY, VALUE);
+            assertFailed(store, failure, OTHER_KEY);
         }
     }
 
