@@ -6,6 +6,7 @@ import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordReader;
 import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
 import com.ryszardzmija.shaledb.storage.hash.index.Index;
+import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -13,22 +14,13 @@ import java.util.Optional;
 public class SegmentReader {
     private final RecordReader recordReader;
     private final Index index;
-    private final long maxSegmentSize;
 
-    public SegmentReader(RecordReader recordReader, Index index, long maxSegmentSize) {
+    public SegmentReader(RecordReader recordReader, Index index) {
         this.recordReader = Objects.requireNonNull(recordReader);
         this.index = Objects.requireNonNull(index);
-        this.maxSegmentSize = maxSegmentSize;
     }
 
     public LookupResult get(ByteKey key) {
-        // Note:
-        // Here we rely on the contract of an Index which implements a state machine
-        // where the key can be in exactly three mutually exclusive states:
-        // - deleted: it's marked as deleted inside the segment
-        // - present: it's present in the segment and not deleted
-        // - not present: it's not in the segment
-
         if (index.isDeleted(key)) {
             return new LookupResult.Deleted();
         }
@@ -39,16 +31,23 @@ public class SegmentReader {
         }
 
         long recordOffset = offset.get();
-        if (recordOffset < 0 || recordOffset >= maxSegmentSize) {
-            throw new RecordIOException.InvalidLocation(
-                    "Indexed offset outside [0, %d)".formatted(maxSegmentSize), recordOffset, null);
+        if (recordOffset < 0) {
+            throw new RecordIOException.InvalidLocation("Indexed offset is negative", recordOffset, null);
         }
 
+        ReadResult readResult;
         try {
-            ReadResult readResult = recordReader.read(new ReadRequest(recordOffset));
-            return new LookupResult.Present(readResult.recordPayload().value());
+            readResult = recordReader.read(new ReadRequest(recordOffset));
         } catch (ReadRequest.BeyondEnd e) {
             throw new RecordIOException.InvalidLocation("Indexed offset is beyond EOF", recordOffset, e);
         }
+        if (readResult.recordType() != RecordType.NORMAL) {
+            throw new IndexConsistencyException(recordOffset,
+                    "Expected record type NORMAL, found " + readResult.recordType());
+        }
+        if (!key.matches(readResult.recordPayload().key())) {
+            throw new IndexConsistencyException(recordOffset, "Record key differs from indexed key");
+        }
+        return new LookupResult.Present(readResult.recordPayload().value());
     }
 }

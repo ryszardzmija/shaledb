@@ -2,6 +2,7 @@ package com.ryszardzmija.shaledb.storage.hash.index;
 
 import java.util.Optional;
 
+/** Each key is absent, present at a record offset, or deleted. Mutations replace its previous state. */
 public interface Index {
     /**
      * Marks the key as present and stores its offset within the segment.

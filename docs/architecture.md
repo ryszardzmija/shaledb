@@ -88,16 +88,20 @@ sequenceDiagram
         else Index contains offset
             S->>F: Read header and payload at offset
             F-->>S: Record bytes
-            S->>S: Validate record and CRC32C
-            S-->>E: Present(value) (stop)
+            S->>S: Validate extent, structure, CRC32C, type and key
+            alt Validation succeeds
+                S-->>E: Present(value) (stop)
+            else Read or verification fails
+                S-->>E: Exception (stop)
+            end
         else No local history for key
             S-->>E: NotPresent (continue)
         end
     end
-    E-->>C: Optional value or empty
+    E-->>C: Optional value, empty or storage exception
 ```
 
-The third lookup state is essential. An absent local entry permits an older value to win. A deletion marker terminates the search immediately. [Indexing](indexing.md)
+Only an absent local entry permits the search to continue. A deletion marker terminates the search with absence, and a failed present read terminates it with a storage exception. [Indexing](indexing.md)
 
 ## Design decisions and trade-offs
 
@@ -105,4 +109,4 @@ The third lookup state is essential. An absent local entry permits an older valu
 - **Preserve reconstructible state.** Writing one record and rebuilding the derived index avoids having to atomically update separate data and index files. The costs are full replay at open, an index per segment and an ever-growing history. This trade-off is an architectural inference. [Indexing](indexing.md)
 - **Preserve explicit durability ordering.** The comment in `SegmentWriter.put` identifies correctness as the rationale for per-write force and acknowledges the throughput cost. This ordering gives a well-defined point to publish to readers. It leaves an uncertainty window when the storage stack reports failure. [SegmentWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentWriter.java)
 - **Construction and policy overlap.** `HashIndexEngine` both assembles the concrete I/O dependencies and coordinates live operations. Segment constructors open channels, replay data and construct their readers and writers. Reusing a single construction boundary could simplify cleanup and fault injection. Additional interfaces would only earn their cost where a distinct owner or policy is needed. [Testing](testing.md)
-- **Two meanings for a size limit.** Rollover uses the configured segment size as an action threshold. Lookup uses the same setting to judge an offset, while replay advances according to actual file contents. These responsibilities can disagree on which records are valid. [Segment management](segment-management.md) · [Configuration](configuration.md)
+- **Segment extent and rollover policy.** Lookup and replay use the actual file extent and the payload read budget. The configured segment size triggers rollover after mutation and can change independently of which historical offsets are readable. [Segment management](segment-management.md) · [Configuration](configuration.md)

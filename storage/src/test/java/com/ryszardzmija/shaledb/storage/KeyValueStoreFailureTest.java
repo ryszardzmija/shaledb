@@ -7,6 +7,7 @@ import com.ryszardzmija.shaledb.storage.config.StorageConfig;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityMode;
 import com.ryszardzmija.shaledb.storage.hash.index.IndexBuildException;
 import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoadingException;
+import com.ryszardzmija.shaledb.storage.hash.segment.model.IndexConsistencyException;
 import com.ryszardzmija.shaledb.storage.serialization.io.DataCorruptionException;
 import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException;
 import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException.Section;
@@ -141,7 +142,7 @@ class KeyValueStoreFailureTest {
     }
 
     @Test
-    void indexedReadDistinguishesAnIncompleteRecordFromAnOffsetBeyondEof() throws IOException {
+    void indexedReadRejectsAnIncompleteRecordAndOffsetsAtOrBeyondEof() throws IOException {
         try (KeyValueStore store = new KeyValueStore(config(128, 256))) {
             store.put(OTHER_KEY, new byte[0]);
             long recordOffset = Files.size(segment(1));
@@ -154,6 +155,15 @@ class KeyValueStoreFailureTest {
                 assertThat(incomplete.getCause().getCause()).isInstanceOfSatisfying(IncompleteRecordException.class,
                         cause -> assertThat(cause.recordOffset()).isEqualTo(recordOffset));
 
+                channel.truncate(recordOffset);
+                StorageEngineException atEof = assertFailure(() -> store.get(KEY), Operation.GET,
+                        Reason.INCOMPLETE_RECORD, MutationOutcome.NOT_APPLICABLE);
+                assertThat(atEof.getCause().getCause()).isInstanceOfSatisfying(IncompleteRecordException.class, cause -> {
+                    assertThat(cause.recordOffset()).isEqualTo(recordOffset);
+                    assertThat(cause.section()).isEqualTo(Section.HEADER);
+                    assertThat(cause.availableBytes()).isZero();
+                });
+
                 channel.truncate(recordOffset - 1);
                 StorageEngineException invalid = assertFailure(() -> store.get(KEY), Operation.GET,
                         Reason.INVALID_RECORD_LOCATION, MutationOutcome.NOT_APPLICABLE);
@@ -165,13 +175,75 @@ class KeyValueStoreFailureTest {
     }
 
     @Test
-    void reportsAnIndexedOffsetRejectedByTheExistingSegmentThresholdCheck() {
-        try (KeyValueStore store = new KeyValueStore(config(128, 256))) {
-            store.put(OTHER_KEY, new byte[63]);
+    void readsHistoricalOffsetsBeyondAReducedRolloverThreshold() throws IOException {
+        long reducedThreshold = 77;
+        byte[] firstValue = new byte[63];
+        byte[] emptyValueKey = {5};
+        byte[] newKey = {6};
+        try (KeyValueStore store = new KeyValueStore(config(64, 256))) {
+            store.put(OTHER_KEY, firstValue);
+            store.put(emptyValueKey, new byte[0]);
+            assertThat(Files.size(segment(1))).isGreaterThan(reducedThreshold);
             store.put(KEY, VALUE);
         }
-        try (KeyValueStore store = new KeyValueStore(config(64, 77))) {
-            assertFailure(() -> store.get(KEY), Operation.GET, Reason.INVALID_RECORD_LOCATION, MutationOutcome.NOT_APPLICABLE);
+        StorageConfig reduced = config(64, reducedThreshold);
+        try (KeyValueStore store = new KeyValueStore(reduced)) {
+            assertThat(segmentCount(directory)).isEqualTo(1);
+            assertValue(store, KEY, VALUE);
+            assertValue(store, OTHER_KEY, firstValue);
+            assertValue(store, emptyValueKey, new byte[0]);
+
+            store.put(newKey, VALUE);
+            assertThat(segmentCount(directory)).isEqualTo(2);
+            assertValue(store, KEY, VALUE);
+            assertValue(store, newKey, VALUE);
+        }
+        try (KeyValueStore store = new KeyValueStore(reduced)) {
+            assertValue(store, KEY, VALUE);
+            assertValue(store, emptyValueKey, new byte[0]);
+            assertValue(store, newKey, VALUE);
+        }
+    }
+
+    @Test
+    void mismatchedRecordInNewestApplicableImmutableSegmentStopsLookup() throws IOException {
+        byte[] latest = {7, 8};
+        try (KeyValueStore store = new KeyValueStore(config(3, 16))) {
+            store.put(KEY, VALUE);
+            assertValue(store, KEY, VALUE);
+            store.put(KEY, latest);
+            store.put(OTHER_KEY, VALUE);
+            assertThat(segmentCount(directory)).isEqualTo(4);
+            assertValue(store, KEY, latest);
+            assertValue(store, OTHER_KEY, VALUE);
+
+            // Substitute complete, checksum-valid bytes while the index still points to this file.
+            Files.write(segment(2), Files.readAllBytes(segment(3)));
+
+            StorageEngineException failure = assertFailure(() -> store.get(KEY), Operation.GET,
+                    Reason.INVALID_INDEX_REFERENCE, MutationOutcome.NOT_APPLICABLE);
+            assertThat(failure.getCause()).hasMessageContaining(segment(2).toString());
+            assertThat(failure.getCause().getCause()).isInstanceOfSatisfying(IndexConsistencyException.class,
+                    cause -> assertThat(cause.recordOffset()).isZero());
+        }
+    }
+
+    @Test
+    void unreadableActiveRecordStopsLookupBeforeAnOlderValue() throws IOException {
+        byte[] latest = {7};
+        try (KeyValueStore store = new KeyValueStore(config(3, 16))) {
+            store.put(KEY, VALUE);
+            assertValue(store, KEY, VALUE);
+            store.put(KEY, latest);
+            assertThat(segmentCount(directory)).isEqualTo(2);
+            assertValue(store, KEY, latest);
+
+            overwriteByte(segment(2), HEADER_SIZE, 99);
+
+            StorageEngineException failure = assertFailure(() -> store.get(KEY), Operation.GET,
+                    Reason.CHECKSUM_CORRUPTION, MutationOutcome.NOT_APPLICABLE);
+            assertThat(failure.getCause()).hasMessageContaining(segment(2).toString());
+            assertThat(failure).hasRootCauseInstanceOf(DataCorruptionException.class);
         }
     }
 
