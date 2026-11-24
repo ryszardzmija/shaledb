@@ -33,7 +33,7 @@ The protected directory is `storage.segmentDir`. Open resolves it with `Path.toR
 | `FAILED` or `CLOSED` | Another failure notification arrives. | Keep the current state. |
 | `CLOSED` | Close is called again. | Stay `CLOSED` and handle any outstanding cleanup. |
 
-`put`, `get` and `delete` require `OPEN` and check availability before arguments, indexes or channels. An unavailable engine throws `IllegalStateException` with the first terminal cause when in `FAILED`. A rollover error after retirement of the installed active segment begins triggers this state because its channels may already be closed. The policy for other operational errors remains open for M1.09. Recovery requires a new engine. [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java) · [Storage semantics](storage-semantics.md#embedded-exception-contract)
+`put`, `get` and `delete` require `OPEN` and check availability before arguments, indexes or channels. The engine enters `FAILED` before propagating a terminal operational failure. Further operations throw `IllegalStateException` with the same terminal failure as their cause. The transition leaves exclusive ownership and cleanup responsibilities with the engine. After safe close, a new instance must acquire ownership and replay a readable history. [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java) · [Fail-stop policy](storage-semantics.md#fail-stop-policy)
 
 ## Cleanup and ownership release
 
@@ -51,5 +51,4 @@ A reader could capture the old active segment during rollover and use its read c
 ## Architectural alternatives
 
 - An internal lock or single engine-owned worker covering complete operations, including open/close transitions and rollover, could make safety independent of the entry point. A lock adds contention around I/O. An asynchronous worker adds a queue and an ownership decision for pending calls. External serialization keeps the present embedded path simple when one caller already owns it.
-- Append and force errors can leave the active file attached to an `OPEN` engine. M1.09 will decide when those errors must trigger the existing `FAILED` transition. M1.11 covers recovery of interrupted writes. [Failure windows](durability-and-recovery.md)
 - Concurrent reads with a serialized writer require a consistent view of both the active index and segment ordering, plus a way to keep channels alive until in-flight reads finish. Recovery needs a stable file set. Future compaction would also need to defer reclamation while any reader can still reach the old files. [Indexing](indexing.md) · [Segment management](segment-management.md)

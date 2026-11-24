@@ -88,14 +88,8 @@ public class HashIndexEngine implements StorageEngine {
             throw new IllegalArgumentException("Value must not be null");
         }
         FormatInfo.getPayloadSize(RecordType.NORMAL, key.length, value.length, maxPayloadSize);
-
-        try {
-            mutableSegment.put(new ByteKey(key), value);
-        } catch (SegmentIOException e) {
-            throw failure(Operation.PUT, MutationOutcome.UNKNOWN, "Failed to append or force put", e);
-        }
-
-        handleRollover(Operation.PUT);
+        ByteKey byteKey = new ByteKey(key);
+        mutate(Operation.PUT, () -> mutableSegment.put(byteKey, value));
     }
 
     @Override
@@ -123,7 +117,10 @@ public class HashIndexEngine implements StorageEngine {
 
             return Optional.empty();
         } catch (SegmentIOException e) {
-            throw failure(Operation.GET, MutationOutcome.NOT_APPLICABLE, "Failed to read indexed record", e);
+            throw terminalFailure(Operation.GET, MutationOutcome.NOT_APPLICABLE, "Failed to read indexed record", e);
+        } catch (RuntimeException | Error e) {
+            markFailed(e);
+            throw e;
         }
     }
 
@@ -143,14 +140,8 @@ public class HashIndexEngine implements StorageEngine {
         requireOpen();
         validateKey(key);
         FormatInfo.getPayloadSize(RecordType.TOMBSTONE, key.length, 0, maxPayloadSize);
-
-        try {
-            mutableSegment.delete(new ByteKey(key));
-        } catch (SegmentIOException e) {
-            throw failure(Operation.DELETE, MutationOutcome.UNKNOWN, "Failed to append or force delete", e);
-        }
-
-        handleRollover(Operation.DELETE);
+        ByteKey byteKey = new ByteKey(key);
+        mutate(Operation.DELETE, () -> mutableSegment.delete(byteKey));
     }
 
     @Override
@@ -202,28 +193,50 @@ public class HashIndexEngine implements StorageEngine {
         }
     }
 
-    private void handleRollover(Operation operation) {
+    private void mutate(Operation operation, Runnable appendAndPublish) {
+        // Caller validation is complete. Guard the append path, including setup of its write position.
+        MutationOutcome outcome = MutationOutcome.UNKNOWN;
         try {
-            if (rolloverPolicy.shouldRollover(mutableSegment)) {
-                // Reserve room before the handler can retire the active segment.
-                immutableSegments.ensureCapacity(immutableSegments.size() + 1);
-                RolloverResult rolloverResult = rolloverHandler.rollOver(mutableSegment);
-                immutableSegments.addFirst(rolloverResult.newImmutableSegment());
-                mutableSegment = rolloverResult.newMutableSegment();
-            }
+            appendAndPublish.run();
+            outcome = MutationOutcome.FORCE_COMPLETED;
+            handleRollover();
         } catch (SegmentIOException | RolloverException e) {
-            StorageEngineException failure = failure(operation, MutationOutcome.FORCE_COMPLETED,
-                    "Rollover check or handoff failed after mutation", e);
-            if (mutableSegment.closeStarted()) {
-                markFailed(failure);
-            }
-            throw failure;
+            String message = outcome == MutationOutcome.FORCE_COMPLETED
+                    ? "Rollover check or handoff failed after mutation" : "Failed to append or force mutation";
+            throw terminalFailure(operation, outcome, message, e);
         } catch (RuntimeException | Error e) {
-            if (mutableSegment.closeStarted()) {
-                markFailed(e);
+            markFailed(e);
+            throw e;
+        }
+    }
+
+    private void handleRollover() {
+        if (!rolloverPolicy.shouldRollover(mutableSegment)) {
+            return;
+        }
+        // Reserve room before the handler can retire the active segment.
+        immutableSegments.ensureCapacity(immutableSegments.size() + 1);
+        RolloverResult replacement = rolloverHandler.rollOver(mutableSegment);
+        mutableSegment = replacement.newMutableSegment();
+        ImmutableSegment historical = replacement.newImmutableSegment();
+        try {
+            immutableSegments.addFirst(historical);
+        } catch (RuntimeException | Error e) {
+            // Keep the successor reachable for close. The history list may never have taken ownership.
+            try {
+                historical.close();
+            } catch (RuntimeException | Error closeFailure) {
+                SegmentChannelCleanup.suppress(e, closeFailure);
             }
             throw e;
         }
+    }
+
+    private StorageEngineException terminalFailure(
+            Operation operation, MutationOutcome outcome, String message, RuntimeException cause) {
+        StorageEngineException failure = failure(operation, outcome, message, cause);
+        markFailed(failure);
+        return failure;
     }
 
     private static StorageEngineException failure(

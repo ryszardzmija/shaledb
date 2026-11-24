@@ -8,8 +8,12 @@ import java.util.Optional;
  * Normal operations check engine availability before validating arguments.
  *
  * <p>Repeating a successful mutation with identical arguments and no intervening changes has the
- * same logical effect. Each successful mutation writes a record. An operational failure can leave
- * a partial or complete record on disk, so callers must account for possible effects before retrying.
+ * same logical effect. Each successful mutation writes a record. An operational mutation failure can
+ * leave a partial or complete record on disk, including a record whose force already succeeded.
+ *
+ * <p>Argument rejection and ordinary misses leave the engine open. A failure in the append through
+ * rollover path or in an indexed lookup disables normal operations and retains exclusive ownership
+ * until safe closure. Subsequent operation rejections carry the first terminal failure as their cause.
  */
 public interface StorageEngine {
     /**
