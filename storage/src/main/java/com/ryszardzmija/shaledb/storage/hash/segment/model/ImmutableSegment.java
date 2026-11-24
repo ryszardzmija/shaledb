@@ -28,12 +28,14 @@ public class ImmutableSegment implements AutoCloseable {
             this.readChannel = openedReadChannel;
             Index index = new IndexBuilder(readChannel, config.maxPayloadSize()).build();
             this.segmentReader = new SegmentReader(new RecordReader(readChannel, config.maxPayloadSize()), index);
-        } catch (IndexBuildException | IOException e) {
+        } catch (IOException | RuntimeException | Error e) {
             if (openedReadChannel != null) {
                 try {
                     openedReadChannel.close();
-                } catch (IOException cleanupFailure) {
-                    e.addSuppressed(cleanupFailure);
+                } catch (IOException | RuntimeException | Error cleanupFailure) {
+                    if (e != cleanupFailure) {
+                        e.addSuppressed(cleanupFailure);
+                    }
                 }
             }
 
@@ -41,7 +43,13 @@ public class ImmutableSegment implements AutoCloseable {
                 throw new SegmentIOException("Failed to create index for segment file " + path, ie);
             }
 
-            throw new SegmentIOException("Failed to open the segment file " + path, e);
+            if (e instanceof IOException || e instanceof UnsupportedOperationException || e instanceof SecurityException) {
+                throw new SegmentIOException("Failed to open the segment file " + path, e);
+            }
+            if (e instanceof RuntimeException unexpected) {
+                throw unexpected;
+            }
+            throw (Error) e;
         }
     }
 

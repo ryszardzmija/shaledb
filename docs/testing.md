@@ -4,6 +4,19 @@ ShaleDB builds with Bazel 9.1.0 and Java language level 25. Bzlmod supplies Java
 
 GitHub Actions runs the root target on pushes and pull requests on `ubuntu-latest` with Temurin 25, Bazelisk and build/repository caches. This describes the checked-in workflow. The results below are from local execution. [CI workflow](../.github/workflows/ci.yaml) · [Storage tests build](../storage/BUILD.bazel) · [Server tests build](../server/BUILD.bazel)
 
+## Execution for M1.07
+
+| Bazel invocation | Baseline | With M1.07 |
+| --- | --- | --- |
+| `bazel test //storage:storage_tests` | 20 targets, 182 JUnit cases passed | 23 targets, 207 JUnit cases passed |
+| `bazel test //:tests` | 22 targets, 197 JUnit cases passed | 25 targets, 222 JUnit cases passed |
+
+The runs used Linux, the Bazel Java 25 runtime, a writable temporary Bazel cache and an explicit Mockito agent. The complete suite ran with loopback access for the gRPC tests. The final JUnit reports recorded zero failures or skipped cases.
+
+The ownership tests use real files for same-JVM contention, equivalent paths, independent directories, lock-file reuse and startup ordering. Fault injection checks cleanup order, conservative retention of ownership and preservation of secondary failures. [DatabaseLockTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/hash/DatabaseLockTest.java) · [DatabaseOwnershipIntegrationTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/DatabaseOwnershipIntegrationTest.java) · [KeyValueStoreIoFailureTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/KeyValueStoreIoFailureTest.java)
+
+Three subprocess cases open `KeyValueStore` through the production path in separate JVMs. They verify exclusion, that a rejected same-JVM open leaves the native lock held, and reacquisition after orderly close and forced termination. They use readiness signaling and bounded waits. The forced termination case uses an idle database to exercise OS lock release. Crash recovery of interrupted writes requires separate verification. [DatabaseOwnershipProcessTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/DatabaseOwnershipProcessTest.java)
+
 ## Execution for M1.06
 
 | Bazel invocation | Baseline | With M1.06 |

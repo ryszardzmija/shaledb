@@ -27,22 +27,25 @@ import java.nio.file.Path;
 import java.util.*;
 
 public class HashIndexEngine implements StorageEngine {
+    private final DatabaseLock ownership;
     private final RolloverPolicy rolloverPolicy;
     private final RolloverHandler rolloverHandler;
     private final long maxPayloadSize;
 
     private final Deque<ImmutableSegment> immutableSegments;
     private MutableSegment mutableSegment;
+    private boolean closed;
 
     public HashIndexEngine(StorageConfig storageConfig) {
         Objects.requireNonNull(storageConfig);
         this.maxPayloadSize = storageConfig.maxPayloadSize();
+        SegmentConfig segmentConfig = SegmentConfig.from(storageConfig);
+        DurabilityConfig durabilityConfig = DurabilityConfig.from(storageConfig);
+        this.ownership = DatabaseLock.acquire(storageConfig.segmentDir());
+        Path segmentDir = ownership.directory();
 
+        boolean loadingSegments = false;
         try {
-            SegmentConfig segmentConfig = SegmentConfig.from(storageConfig);
-            DurabilityConfig durabilityConfig = DurabilityConfig.from(storageConfig);
-
-            Path segmentDir = storageConfig.segmentDir();
             NavigableMap<Long, Path> discovered = new SegmentFileDiscoverer(segmentDir).discoverSegmentFiles();
             Map.Entry<Long, Path> latest = discovered.lastEntry();
             FileSystemSync fileSystemSync = new FileSystemSync();
@@ -55,17 +58,39 @@ public class HashIndexEngine implements StorageEngine {
             SegmentLayout segmentLayout = latest == null
                     ? new SegmentLayout(List.of(), segmentFileFactory.createSegmentFile())
                     : new SegmentLayout(List.copyOf(discovered.headMap(latest.getKey(), false).values()), latest.getValue());
+            loadingSegments = true;
             LoadedSegments loadedSegments = segmentLoader.loadSegments(segmentLayout);
             this.immutableSegments = loadedSegments.immutableSegments();
             this.mutableSegment = loadedSegments.mutableSegment();
-        } catch (SegmentFileException | SegmentFileDiscoveryException | SegmentLoadingException e) {
-            throw failure(Operation.OPEN, MutationOutcome.NOT_APPLICABLE,
-                    "Failed to open store in " + storageConfig.segmentDir(), e);
+        } catch (RuntimeException | Error e) {
+            boolean segmentCleanupFailed = e instanceof SegmentFileException creationFailure
+                    ? creationFailure.segmentChannelCloseFailed()
+                    : loadingSegments && segmentLoadCleanupFailed(e);
+            if (!segmentCleanupFailed) {
+                ownership.closeAfterFailedOpen(e);
+            }
+            if (e instanceof SegmentFileException || e instanceof SegmentFileDiscoveryException
+                    || e instanceof SegmentLoadingException) {
+                throw failure(Operation.OPEN, MutationOutcome.NOT_APPLICABLE,
+                        "Failed to open store in " + segmentDir, (RuntimeException) e);
+            }
+            throw e;
         }
+    }
+
+    private static boolean segmentLoadCleanupFailed(Throwable failure) {
+        // Segment constructors and the loader preserve channel close failures on the startup cause chain.
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause.getSuppressed().length != 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
     public void put(byte[] key, byte[] value) {
+        requireOpen();
         validateKey(key);
         if (value == null) {
             throw new IllegalArgumentException("Value must not be null");
@@ -83,6 +108,7 @@ public class HashIndexEngine implements StorageEngine {
 
     @Override
     public Optional<byte[]> get(byte[] key) {
+        requireOpen();
         validateKey(key);
         ByteKey byteKey = new ByteKey(key);
 
@@ -122,6 +148,7 @@ public class HashIndexEngine implements StorageEngine {
      */
     @Override
     public void delete(byte[] key) {
+        requireOpen();
         validateKey(key);
         FormatInfo.getPayloadSize(RecordType.TOMBSTONE, key.length, 0, maxPayloadSize);
 
@@ -136,28 +163,60 @@ public class HashIndexEngine implements StorageEngine {
 
     @Override
     public void close() {
-        SegmentIOException primaryFailure = null;
-        try (MutableSegment segment = mutableSegment) {
-            segment.sync();
-        } catch (SegmentIOException e) {
+        if (closed) {
+            return;
+        }
+        closed = true;
+
+        Throwable primaryFailure = null;
+        try {
+            mutableSegment.sync();
+        } catch (RuntimeException | Error e) {
             primaryFailure = e;
         }
 
+        boolean segmentCloseFailed = false;
+        try {
+            mutableSegment.close();
+        } catch (RuntimeException | Error e) {
+            segmentCloseFailed = true;
+            primaryFailure = retainFailure(primaryFailure, e);
+        }
         for (ImmutableSegment segment : immutableSegments) {
             try {
                 segment.close();
-            } catch (SegmentIOException e) {
-                if (primaryFailure == null) {
-                    primaryFailure = e;
-                } else {
-                    primaryFailure.addSuppressed(e);
-                }
+            } catch (RuntimeException | Error e) {
+                segmentCloseFailed = true;
+                primaryFailure = retainFailure(primaryFailure, e);
             }
         }
 
-        if (primaryFailure != null) {
-            throw failure(Operation.CLOSE, MutationOutcome.NOT_APPLICABLE, "Failed to close store", primaryFailure);
+        if (!segmentCloseFailed) {
+            try {
+                ownership.close();
+            } catch (RuntimeException | Error e) {
+                primaryFailure = retainFailure(primaryFailure, e);
+            }
         }
+        if (primaryFailure instanceof SegmentIOException e) {
+            throw failure(Operation.CLOSE, MutationOutcome.NOT_APPLICABLE, "Failed to close store", e);
+        }
+        if (primaryFailure instanceof RuntimeException e) {
+            throw e;
+        }
+        if (primaryFailure instanceof Error e) {
+            throw e;
+        }
+    }
+
+    private static Throwable retainFailure(Throwable primaryFailure, Throwable cleanupFailure) {
+        if (primaryFailure == null) {
+            return cleanupFailure;
+        }
+        if (primaryFailure != cleanupFailure) {
+            primaryFailure.addSuppressed(cleanupFailure);
+        }
+        return primaryFailure;
     }
 
     private void handleRollover(Operation operation) {
@@ -203,6 +262,12 @@ public class HashIndexEngine implements StorageEngine {
     private static void validateKey(byte[] key) {
         if (key == null || key.length == 0) {
             throw new IllegalArgumentException("Key must not be null or empty");
+        }
+    }
+
+    private void requireOpen() {
+        if (closed) {
+            throw new IllegalStateException("Storage engine is closed");
         }
     }
 }

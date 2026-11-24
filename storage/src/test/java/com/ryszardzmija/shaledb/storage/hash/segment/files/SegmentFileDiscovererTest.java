@@ -34,6 +34,7 @@ class SegmentFileDiscovererTest {
         Path localized = Files.createFile(directory.resolve("segment_٠٠٠٠٠٩.log"));
         Path padded = Files.createFile(directory.resolve("segment_000010.log"));
         Files.createFile(directory.resolve("metadata.log"));
+        Files.createFile(directory.resolve("LOCK"));
         Files.createDirectory(directory.resolve("SEGMENT_7.log"));
 
         var segments = new SegmentFileDiscoverer(directory).discoverSegmentFiles();
@@ -43,7 +44,8 @@ class SegmentFileDiscovererTest {
     }
 
     @Test
-    void returnsAnEmptyLayoutWhenOnlyUnrelatedEntriesExist() throws IOException {
+    void returnsAnEmptyLayoutWhenOnlyTheLockAndUnrelatedEntriesExist() throws IOException {
+        Files.createFile(directory.resolve("LOCK"));
         Files.createFile(directory.resolve(".lock"));
         Files.createDirectory(directory.resolve("metadata"));
 

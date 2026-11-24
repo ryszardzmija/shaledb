@@ -24,7 +24,8 @@ public class SegmentLoader {
 
     public LoadedSegments loadSegments(SegmentLayout segmentLayout) {
         List<Path> immutableSegmentPaths = segmentLayout.immutableSegmentPaths();
-        Deque<ImmutableSegment> immutableSegments = new ArrayDeque<>();
+        Deque<ImmutableSegment> immutableSegments = new ArrayDeque<>(immutableSegmentPaths.size());
+        MutableSegment mutableSegment = null;
 
         try {
             // Iterate from the newest segment file to the oldest.
@@ -33,18 +34,30 @@ public class SegmentLoader {
             }
 
             Path mutableSegmentPath = segmentLayout.mutableSegmentPath();
-            MutableSegment mutableSegment = new MutableSegment(mutableSegmentPath, segmentConfig, durabilityConfig);
+            mutableSegment = new MutableSegment(mutableSegmentPath, segmentConfig, durabilityConfig);
 
             return new LoadedSegments(immutableSegments, mutableSegment);
-        } catch (SegmentIOException e) {
-            for (ImmutableSegment segment : immutableSegments) {
-                try {
-                    segment.close();
-                } catch (SegmentIOException cleanupFailure) {
-                    e.addSuppressed(cleanupFailure);
-                }
+        } catch (RuntimeException | Error e) {
+            if (mutableSegment != null) {
+                closeAfterFailure(mutableSegment, e);
             }
-            throw new SegmentLoadingException("Failed to load segments", e);
+            for (ImmutableSegment segment : immutableSegments) {
+                closeAfterFailure(segment, e);
+            }
+            if (e instanceof SegmentIOException) {
+                throw new SegmentLoadingException("Failed to load segments", e);
+            }
+            throw e;
+        }
+    }
+
+    private static void closeAfterFailure(AutoCloseable segment, Throwable failure) {
+        try {
+            segment.close();
+        } catch (Exception | Error cleanupFailure) {
+            if (failure != cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
         }
     }
 }

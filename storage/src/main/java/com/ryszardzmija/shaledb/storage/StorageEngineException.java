@@ -17,7 +17,10 @@ public class StorageEngineException extends RuntimeException {
         INVALID_SEGMENT_METADATA,
         UNSPECIFIED,
         INVALID_INDEX_REFERENCE,
-        SEGMENT_ID_EXHAUSTED
+        SEGMENT_ID_EXHAUSTED,
+        DATABASE_LOCKED,
+        INVALID_LOCK_FILE,
+        OWNERSHIP_IO
     }
 
     public enum MutationOutcome {

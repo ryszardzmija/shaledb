@@ -4,6 +4,7 @@ import java.util.Optional;
 
 /**
  * A storage engine for key-value pairs.
+ * Calls on the same engine, including close, must be serialized by the caller.
  *
  * <p>Repeating a successful mutation with identical arguments and no intervening changes has the
  * same logical effect. Each successful mutation writes a record. An operational failure can leave
@@ -20,6 +21,7 @@ public interface StorageEngine {
      * @param value a non-null array of bytes representing the value; may be empty
      * @throws IllegalArgumentException if the key or value is null, the key is empty,
      *                                  or the combined key and value exceed the payload limit
+     * @throws IllegalStateException if the engine has been closed
      * @throws StorageEngineException if append, force or subsequent segment management fails.
      *                                See {@link StorageEngineException#mutationOutcome()}.
      */
@@ -33,6 +35,7 @@ public interface StorageEngine {
      *
      * @param key a non-empty array of bytes representing the key
      * @throws IllegalArgumentException if the key is null, empty, or exceeds the payload limit
+     * @throws IllegalStateException if the engine has been closed
      * @throws StorageEngineException if append, force or subsequent segment management fails.
      *                                See {@link StorageEngineException#mutationOutcome()}.
      */
@@ -44,6 +47,7 @@ public interface StorageEngine {
      * @param key a non-empty array of bytes representing the key
      * @return the value (which may be an empty array), or {@link Optional#empty()} if the key is absent or deleted
      * @throws IllegalArgumentException if the key is null or empty
+     * @throws IllegalStateException if the engine has been closed
      * @throws StorageEngineException if an expected record cannot be read or validated
      */
     Optional<byte[]> get(byte[] key);

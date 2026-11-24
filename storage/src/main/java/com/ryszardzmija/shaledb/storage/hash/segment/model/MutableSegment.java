@@ -40,18 +40,26 @@ public class MutableSegment implements AutoCloseable {
 
             this.recordWriter = new RecordWriter(writeChannel, new FileSystemSync(), segmentConfig.maxPayloadSize());
             this.segmentWriter = new SegmentWriter(recordWriter, index, durabilityConfig.durabilityMode());
-        } catch (IndexBuildException | IOException e) {
+        } catch (IOException | RuntimeException | Error e) {
             try {
                 closeChannels(openedReadChannel, openedWriteChannel);
-            } catch (IOException cleanupFailure) {
-                e.addSuppressed(cleanupFailure);
+            } catch (IOException | RuntimeException | Error cleanupFailure) {
+                if (e != cleanupFailure) {
+                    e.addSuppressed(cleanupFailure);
+                }
             }
 
             if (e instanceof IndexBuildException ie) {
                 throw new SegmentIOException("Failed to create index for segment file " + path, ie);
             }
 
-            throw new SegmentIOException("Failed to open the segment file " + path, e);
+            if (e instanceof IOException || e instanceof UnsupportedOperationException || e instanceof SecurityException) {
+                throw new SegmentIOException("Failed to open the segment file " + path, e);
+            }
+            if (e instanceof RuntimeException unexpected) {
+                throw unexpected;
+            }
+            throw (Error) e;
         }
     }
 
