@@ -13,7 +13,7 @@ A healthy engine with `S` segments retains `S + 1` file channels (one reader per
 
 ## Rollover in execution order
 
-The size policy reads `mutableSegment.size()` through the read channel **after** the mutation is forced and indexed. It triggers when actual file bytes are `>= maxSegmentSize`. Size includes headers and all old versions. There is no preflight against the next record and no size-triggered rollover in the constructor. [SizeBasedRolloverPolicy](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/rollover/SizeBasedRolloverPolicy.java) · [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java)
+The size policy reads `mutableSegment.size()` through the read channel **after** the mutation is forced and indexed. It triggers when actual file bytes are `>= maxSegmentSize`. Size includes headers and all old versions. Admission ensures an individual record fits the budget of an empty segment. The engine checks the segment's size only after append, and the constructor performs no size-triggered rollover. [Configuration](configuration.md) · [SizeBasedRolloverPolicy](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/rollover/SizeBasedRolloverPolicy.java) · [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java)
 
 | Order | `RolloverHandler.rollOver` and engine publication |
 | --- | --- |
