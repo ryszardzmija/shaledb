@@ -42,13 +42,13 @@ Short positive transfers continue from the bytes already transferred. Three cons
 
 | Condition | Implemented result |
 | --- | --- |
-| Negative offset or offset beyond the observed file size | `IllegalArgumentException`. A negative offset fails at request construction. |
+| Negative offset or offset beyond the observed file size | A negative offset is rejected at request construction with `IllegalArgumentException`. An offset beyond EOF throws its `ReadRequest.BeyondEnd` subtype, which lookup and replay translate for an expected record. |
 | Scan reaches EOF at a record boundary | Normal completion. The scanner checks file size before requesting another record. |
 | Extent too short for the expected header or payload, or EOF during a transfer | `IncompleteRecordException` gives the record start, section, expected byte count and bytes seen in the extent or transferred before EOF. A point read starting exactly at EOF reports an incomplete header with zero bytes available. |
-| Bad type, invalid lengths, a tombstone carrying value bytes or a size outside the implementation range | `DataCorruptionException` before payload allocation and checksum comparison. The cause identifies the failed type or size validation. |
-| Representable lengths that exceed the configured payload budget | `FormatInfo.PayloadLimitExceededException` before checking payload extent or allocating a payload buffer. |
+| Bad type, invalid lengths or a tombstone carrying value bytes | `DataCorruptionException` with kind `STRUCTURE`, before payload allocation and checksum comparison. The cause identifies the failed type or structure validation. |
+| Structurally valid fields declaring a size outside the implementation or configured budget | `RecordIOException.ReadLimitExceeded` preserves the record offset and `FormatInfo.PayloadLimitExceededException` cause. This check precedes validation of payload extent. |
 | Channel I/O exception or repeated zero progress | `RecordIOException` retains the original `IOException`. A stalled transfer raises its `NoProgress` subtype. A failed write can leave a prefix in the file. [Durability and recovery](durability-and-recovery.md) |
-| CRC mismatch | `DataCorruptionException`. CRC includes the type and both lengths, so changes to the key/value boundary are detectable even at constant total length. CRC provides error detection with possible collisions. It supplies neither record identity nor evidence that the entire file set survived. |
+| CRC mismatch | `DataCorruptionException` with kind `CHECKSUM`. CRC includes the type and both lengths, so a change to the key/value boundary can be detected even at constant total length. CRC provides error detection with possible collisions. It supplies neither record identity nor evidence that the entire file set survived. |
 
 The buffer capacity uses a signed integer. A payload that fits the size and extent checks can still exceed available heap, and the reader also allocates separate output arrays. An incomplete payload describes the observed byte shortage. Damaged length fields can produce the same observation as an interrupted append. Reads leave file bytes intact. Tail repair requires a separate recovery policy. [RecordReaderTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordReaderTest.java)
 

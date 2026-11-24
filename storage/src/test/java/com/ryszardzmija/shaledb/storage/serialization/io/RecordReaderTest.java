@@ -4,7 +4,9 @@ import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
 import com.ryszardzmija.shaledb.storage.hash.index.IndexBuildException;
 import com.ryszardzmija.shaledb.storage.hash.index.IndexBuilder;
 import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException.Section;
+import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException.ReadLimitExceeded;
 import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo.PayloadLimitExceededException;
+import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo.PayloadLimitExceededException.Limit;
 import com.ryszardzmija.shaledb.storage.serialization.spec.TypeDecodingException;
 import org.assertj.core.api.ThrowableAssertAlternative;
 import org.junit.jupiter.api.Test;
@@ -118,12 +120,12 @@ class RecordReaderTest {
 
         try (FileChannel channel = FileChannel.open(path, READ)) {
             RecordReader reader = new RecordReader(channel, KEY_LENGTH + VALUE_LENGTH - 1);
-            assertThatExceptionOfType(PayloadLimitExceededException.class)
-                    .isThrownBy(() -> reader.read(new ReadRequest(0)))
-                    .withMessageContaining("Record payload size 5 exceeds configured maxPayloadSize 4");
+            ReadLimitExceeded failure = catchThrowableOfType(() -> reader.read(new ReadRequest(0)), ReadLimitExceeded.class);
+            assertReadLimit(failure, Limit.CONFIGURED, 5, 4);
             assertThatExceptionOfType(IndexBuildException.class)
                     .isThrownBy(() -> new IndexBuilder(channel, KEY_LENGTH + VALUE_LENGTH - 1).build())
-                    .withCauseInstanceOf(PayloadLimitExceededException.class);
+                    .withCauseInstanceOf(ReadLimitExceeded.class)
+                    .withRootCauseInstanceOf(PayloadLimitExceededException.class);
         }
     }
 
@@ -132,7 +134,7 @@ class RecordReaderTest {
         Path path = Files.write(tempDir.resolve("record.data"), Arrays.copyOf(validRecord(), HEADER_SIZE));
 
         try (FileChannel channel = FileChannel.open(path, READ)) {
-            assertThatExceptionOfType(PayloadLimitExceededException.class)
+            assertThatExceptionOfType(ReadLimitExceeded.class)
                     .isThrownBy(() -> new RecordReader(channel, 4).read(new ReadRequest(0)));
         }
     }
@@ -149,19 +151,35 @@ class RecordReaderTest {
     void rejectsOversizedPayloadWhenDeclaredLengthsSumBeyondIntegerRange() throws IOException {
         byte[] bytes = recordWithChecksum(0, Integer.MAX_VALUE, 1, new byte[0]);
 
-        assertCorruption(bytes).withMessageContaining("representable range");
-        assertCorruption(bytes, 0, Long.MAX_VALUE)
-                .withMessageContaining("2147483648")
-                .withMessageContaining("representable range");
+        assertImplementationLimit(bytes, MAX_PAYLOAD_SIZE, (long) Integer.MAX_VALUE + 1);
+        assertImplementationLimit(bytes, Long.MAX_VALUE, (long) Integer.MAX_VALUE + 1);
     }
 
     @Test
     void rejectsRepresentablePayloadLengthWithoutRoomForHeader() throws IOException {
         byte[] bytes = recordWithChecksum(0, 1, Integer.MAX_VALUE - 13, new byte[0]);
 
-        assertCorruption(bytes, 0, Integer.MAX_VALUE)
-                .withMessageContaining("2147483635")
-                .withMessageContaining("representable range");
+        assertImplementationLimit(bytes, Integer.MAX_VALUE, (long) Integer.MAX_VALUE - HEADER_SIZE + 1);
+    }
+
+    private void assertImplementationLimit(byte[] bytes, long readLimit, long declaredPayloadSize) throws IOException {
+        Path path = Files.write(tempDir.resolve("record.data"), bytes);
+        try (FileChannel channel = FileChannel.open(path, READ)) {
+            RecordReader reader = new RecordReader(channel, readLimit);
+            ReadLimitExceeded failure = catchThrowableOfType(() -> reader.read(new ReadRequest(0)), ReadLimitExceeded.class);
+            assertReadLimit(failure, Limit.IMPLEMENTATION, declaredPayloadSize, Integer.MAX_VALUE - HEADER_SIZE);
+        }
+        assertThat(Files.readAllBytes(path)).containsExactly(bytes);
+    }
+
+    private static void assertReadLimit(ReadLimitExceeded failure, Limit limit, long declaredSize, long maximum) {
+        assertThat(failure).isNotNull();
+        assertThat(failure.recordOffset()).isZero();
+        assertThat(failure.getCause()).isInstanceOfSatisfying(PayloadLimitExceededException.class, cause -> {
+            assertThat(cause.limit()).isEqualTo(limit);
+            assertThat(cause.payloadSize()).isEqualTo(declaredSize);
+            assertThat(cause.maxPayloadSize()).isEqualTo(maximum);
+        });
     }
 
     @Test

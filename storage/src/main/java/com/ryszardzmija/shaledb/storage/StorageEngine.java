@@ -5,8 +5,9 @@ import java.util.Optional;
 /**
  * A storage engine for key-value pairs.
  *
- * <p>All mutating operations are idempotent when replayed with identical arguments.
- * Repeating the same operation produces the same observable state as executing it once.
+ * <p>Repeating a successful mutation with identical arguments and no intervening changes has the
+ * same logical effect. Each successful mutation writes a record. An operational failure can leave
+ * a partial or complete record on disk, so callers must account for possible effects before retrying.
  */
 public interface StorageEngine {
     /**
@@ -19,7 +20,8 @@ public interface StorageEngine {
      * @param value a non-null array of bytes representing the value; may be empty
      * @throws IllegalArgumentException if the key or value is null, the key is empty,
      *                                  or the combined key and value exceed the payload limit
-     * @throws StorageEngineException if the key-value pair fails to be written
+     * @throws StorageEngineException if append, force or subsequent segment management fails.
+     *                                See {@link StorageEngineException#mutationOutcome()}.
      */
     void put(byte[] key, byte[] value);
 
@@ -31,7 +33,8 @@ public interface StorageEngine {
      *
      * @param key a non-empty array of bytes representing the key
      * @throws IllegalArgumentException if the key is null, empty, or exceeds the payload limit
-     * @throws StorageEngineException if the key-value pair associated with the key fails to be deleted
+     * @throws StorageEngineException if append, force or subsequent segment management fails.
+     *                                See {@link StorageEngineException#mutationOutcome()}.
      */
     void delete(byte[] key);
 
@@ -39,9 +42,9 @@ public interface StorageEngine {
      * Retrieves the value associated with the key.
      *
      * @param key a non-empty array of bytes representing the key
-     * @return the value associated with the given key, or {@link Optional#empty()} if the key does not exist
+     * @return the value (which may be an empty array), or {@link Optional#empty()} if the key is absent or deleted
      * @throws IllegalArgumentException if the key is null or empty
-     * @throws StorageEngineException if the value associated with the key fails to be retrieved
+     * @throws StorageEngineException if an expected record cannot be read or validated
      */
     Optional<byte[]> get(byte[] key);
 

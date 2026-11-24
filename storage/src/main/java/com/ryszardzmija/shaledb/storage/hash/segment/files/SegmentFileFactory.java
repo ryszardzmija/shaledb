@@ -4,8 +4,10 @@ import com.ryszardzmija.shaledb.storage.durability.DurabilityException;
 import com.ryszardzmija.shaledb.storage.durability.FileSystemSync;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.stream.Stream;
@@ -19,9 +21,7 @@ public class SegmentFileFactory {
 
     public SegmentFileFactory(Path segmentDir, FileSystemSync fileSystemSync) {
         this.segmentDir = Objects.requireNonNull(segmentDir);
-        if (!Files.isDirectory(this.segmentDir)) {
-            throw new SegmentFileException(segmentDir + " is not a directory, expected a directory with segment files");
-        }
+        requireDirectory(this.segmentDir);
         this.fileSystemSync = Objects.requireNonNull(fileSystemSync);
         this.lastId = resolveLastId().orElse(FileFormatInfo.getFirstId() - 1);
     }
@@ -44,12 +44,16 @@ public class SegmentFileFactory {
             return newSegmentFile;
         } catch (IOException e) {
             throw new SegmentFileException("Failed to create a segment file " + segmentPath, e);
+        } catch (UncheckedIOException e) {
+            throw new SegmentFileException("Failed to close the directory after publishing " + segmentPath, e);
         } catch (DurabilityException e) {
             try {
                 Files.deleteIfExists(segmentPath);
                 fileSystemSync.forceDirectory(segmentDir);
-            } catch (IOException | DurabilityException cleanupFailure) {
-                e.addSuppressed(cleanupFailure);
+            } catch (IOException | UncheckedIOException | DurabilityException cleanupFailure) {
+                if (e != cleanupFailure) {
+                    e.addSuppressed(cleanupFailure);
+                }
             }
             throw new SegmentFileException("Failed to flush segment file creation: " + segmentPath, e);
         }
@@ -59,13 +63,23 @@ public class SegmentFileFactory {
         return segmentDir;
     }
 
+    static void requireDirectory(Path directory) {
+        try {
+            if (!Files.readAttributes(directory, BasicFileAttributes.class).isDirectory()) {
+                throw new SegmentFileException(directory + " is not a directory, expected a directory with segment files");
+            }
+        } catch (IOException e) {
+            throw new SegmentFileException("Failed to inspect segment directory " + directory, e);
+        }
+    }
+
     private OptionalLong resolveLastId() {
         try (Stream<Path> files = Files.list(segmentDir)) {
             return files
                     .filter(p -> p.getFileName().toString().matches(FileFormatInfo.getReadFileRegex()))
                     .mapToLong(FileFormatInfo::extractId)
                     .max();
-        } catch (IOException e) {
+        } catch (IOException | UncheckedIOException e) {
             throw new SegmentFileException("Failed to resolve the last ID of a segment file in " + segmentDir, e);
         }
     }

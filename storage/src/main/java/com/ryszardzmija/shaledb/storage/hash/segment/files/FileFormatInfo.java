@@ -34,7 +34,7 @@ class FileFormatInfo {
         try {
             return Long.parseLong(idStr);
         } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(extractIdErrorMessage.formatted(filename), e);
+            throw new SegmentFileDiscoveryException(extractIdErrorMessage.formatted(filename), e);
         }
     }
 }

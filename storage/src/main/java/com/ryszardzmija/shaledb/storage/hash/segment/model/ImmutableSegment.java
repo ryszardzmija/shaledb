@@ -6,8 +6,6 @@ import com.ryszardzmija.shaledb.storage.serialization.io.RecordReader;
 import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
 import com.ryszardzmija.shaledb.storage.hash.index.IndexBuildException;
 import com.ryszardzmija.shaledb.storage.hash.index.IndexBuilder;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -16,8 +14,6 @@ import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 
 public class ImmutableSegment implements AutoCloseable {
-    private static final Logger logger = LoggerFactory.getLogger(ImmutableSegment.class);
-
     private final Path path;
     private final FileChannel readChannel;
     private final SegmentReader segmentReader;
@@ -36,7 +32,9 @@ public class ImmutableSegment implements AutoCloseable {
             if (openedReadChannel != null) {
                 try {
                     openedReadChannel.close();
-                } catch (IOException ignored) {}
+                } catch (IOException cleanupFailure) {
+                    e.addSuppressed(cleanupFailure);
+                }
             }
 
             if (e instanceof IndexBuildException ie) {
@@ -68,7 +66,7 @@ public class ImmutableSegment implements AutoCloseable {
         try {
             readChannel.close();
         } catch (IOException e) {
-            logger.warn("Failed to close read channel of segment {}", path, e);
+            throw new SegmentIOException("Failed to close segment " + path, e);
         }
     }
 }

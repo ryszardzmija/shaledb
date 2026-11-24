@@ -5,7 +5,6 @@ import com.ryszardzmija.shaledb.storage.serialization.io.ReadResult;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordReader;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
-import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo.PayloadLimitExceededException;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -21,31 +20,24 @@ public class IndexBuilder {
     }
 
     public Index build() {
-        try {
-            return createIndex();
-        } catch (RecordIOException | IOException | PayloadLimitExceededException e) {
-            throw new IndexBuildException("Failed to build index", e);
-        }
-    }
-
-    private Index createIndex() throws IOException {
         Index index = new HashIndex();
-
         long currentOffset = 0;
-        while (currentOffset < readChannel.size()) {
-            ReadRequest readRequest = new ReadRequest(currentOffset);
-            ReadResult readResult = recordReader.read(readRequest);
-
-            ByteKey key = new ByteKey(readResult.recordPayload().key());
-            if (readResult.recordType() == RecordType.TOMBSTONE) {
-                index.markDeleted(key);
-            } else {
-                index.markPresent(key, currentOffset);
+        try {
+            while (currentOffset < readChannel.size()) {
+                ReadResult readResult = recordReader.read(new ReadRequest(currentOffset));
+                ByteKey key = new ByteKey(readResult.recordPayload().key());
+                if (readResult.recordType() == RecordType.TOMBSTONE) {
+                    index.markDeleted(key);
+                } else {
+                    index.markPresent(key, currentOffset);
+                }
+                currentOffset = readResult.nextRecordOffset();
             }
-
-            currentOffset = readResult.nextRecordOffset();
+            return index;
+        } catch (ReadRequest.BeyondEnd e) {
+            throw new IndexBuildException("Segment file shrank during index rebuild at offset " + currentOffset, e);
+        } catch (RecordIOException | IOException e) {
+            throw new IndexBuildException("Failed to build index at offset " + currentOffset, e);
         }
-
-        return index;
     }
 }

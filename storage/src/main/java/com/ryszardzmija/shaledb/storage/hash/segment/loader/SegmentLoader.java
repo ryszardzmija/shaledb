@@ -37,14 +37,14 @@ public class SegmentLoader {
 
             return new LoadedSegments(immutableSegments, mutableSegment);
         } catch (SegmentIOException e) {
-            closeAll(immutableSegments);
+            for (ImmutableSegment segment : immutableSegments) {
+                try {
+                    segment.close();
+                } catch (SegmentIOException cleanupFailure) {
+                    e.addSuppressed(cleanupFailure);
+                }
+            }
             throw new SegmentLoadingException("Failed to load segments", e);
-        }
-    }
-
-    private void closeAll(Deque<ImmutableSegment> segments) {
-        for (ImmutableSegment segment : segments) {
-            segment.close();
         }
     }
 }

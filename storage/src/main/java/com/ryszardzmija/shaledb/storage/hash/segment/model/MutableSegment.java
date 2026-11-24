@@ -9,8 +9,6 @@ import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
 import com.ryszardzmija.shaledb.storage.hash.index.Index;
 import com.ryszardzmija.shaledb.storage.hash.index.IndexBuildException;
 import com.ryszardzmija.shaledb.storage.hash.index.IndexBuilder;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -19,8 +17,6 @@ import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 
 public class MutableSegment implements AutoCloseable {
-    private static final Logger logger = LoggerFactory.getLogger(MutableSegment.class);
-
     private final Path path;
     private final FileChannel readChannel;
     private final FileChannel writeChannel;
@@ -45,15 +41,10 @@ public class MutableSegment implements AutoCloseable {
             this.recordWriter = new RecordWriter(writeChannel, new FileSystemSync(), segmentConfig.maxPayloadSize());
             this.segmentWriter = new SegmentWriter(recordWriter, index, durabilityConfig.durabilityMode());
         } catch (IndexBuildException | IOException e) {
-            if (openedReadChannel != null) {
-                try {
-                    openedReadChannel.close() ;
-                } catch (IOException ignored) {}
-            }
-            if (openedWriteChannel != null) {
-                try {
-                    openedWriteChannel.close();
-                } catch (IOException ignored) {}
+            try {
+                closeChannels(openedReadChannel, openedWriteChannel);
+            } catch (IOException cleanupFailure) {
+                e.addSuppressed(cleanupFailure);
             }
 
             if (e instanceof IndexBuildException ie) {
@@ -111,15 +102,15 @@ public class MutableSegment implements AutoCloseable {
     @Override
     public void close() {
         try {
-            readChannel.close();
+            closeChannels(readChannel, writeChannel);
         } catch (IOException e) {
-            logger.warn("Failed to close read channel of segment {}", path, e);
+            throw new SegmentIOException("Failed to close segment " + path, e);
         }
+    }
 
-        try {
-            writeChannel.close();
-        } catch (IOException e) {
-            logger.warn("Failed to close write channel of segment {}", path, e);
+    private static void closeChannels(FileChannel readChannel, FileChannel writeChannel) throws IOException {
+        try (writeChannel; readChannel) {
+            // Close the read channel first and preserve a second close failure as suppressed.
         }
     }
 }
