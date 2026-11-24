@@ -5,6 +5,7 @@ import java.util.Optional;
 /**
  * A storage engine for key-value pairs.
  * Calls on the same engine, including close, must be serialized by the caller.
+ * Normal operations check engine availability before validating arguments.
  *
  * <p>Repeating a successful mutation with identical arguments and no intervening changes has the
  * same logical effect. Each successful mutation writes a record. An operational failure can leave
@@ -21,7 +22,7 @@ public interface StorageEngine {
      * @param value a non-null array of bytes representing the value; may be empty
      * @throws IllegalArgumentException if the key or value is null, the key is empty,
      *                                  or the combined key and value exceed the payload limit
-     * @throws IllegalStateException if the engine has been closed
+     * @throws IllegalStateException if the engine is closed or failed
      * @throws StorageEngineException if append, force or subsequent segment management fails.
      *                                See {@link StorageEngineException#mutationOutcome()}.
      */
@@ -35,7 +36,7 @@ public interface StorageEngine {
      *
      * @param key a non-empty array of bytes representing the key
      * @throws IllegalArgumentException if the key is null, empty, or exceeds the payload limit
-     * @throws IllegalStateException if the engine has been closed
+     * @throws IllegalStateException if the engine is closed or failed
      * @throws StorageEngineException if append, force or subsequent segment management fails.
      *                                See {@link StorageEngineException#mutationOutcome()}.
      */
@@ -47,7 +48,7 @@ public interface StorageEngine {
      * @param key a non-empty array of bytes representing the key
      * @return the value (which may be an empty array), or {@link Optional#empty()} if the key is absent or deleted
      * @throws IllegalArgumentException if the key is null or empty
-     * @throws IllegalStateException if the engine has been closed
+     * @throws IllegalStateException if the engine is closed or failed
      * @throws StorageEngineException if an expected record cannot be read or validated
      */
     Optional<byte[]> get(byte[] key);
@@ -55,13 +56,14 @@ public interface StorageEngine {
     /**
      * Releases all resources held by the storage engine.
      *
-     * <p>Implementations must flush all pending writes to persistent storage before
-     * returning successfully. If pending writes cannot be flushed, this method must
-     * still make a best-effort attempt to release resources and then throw
-     * {@link StorageEngineException}.
+     * <p>The first close of an operational engine attempts a final flush before closing
+     * its storage resources. Closing a failed engine proceeds directly to resource cleanup.
+     * A flush failure is reported even if resource cleanup succeeds.
      *
      * <p>After this method is called, whether it returns successfully or throws,
-     * this storage engine is considered closed and must not be used again.
+     * normal operations are permanently unavailable. Further close calls may retry
+     * outstanding cleanup. Exclusive ownership is released only when segment channels
+     * can no longer be used.
      *
      * @throws StorageEngineException if pending writes cannot be flushed or resources cannot be released
      */

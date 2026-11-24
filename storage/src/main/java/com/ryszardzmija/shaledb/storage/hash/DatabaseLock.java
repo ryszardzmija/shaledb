@@ -3,6 +3,7 @@ package com.ryszardzmija.shaledb.storage.hash;
 import com.ryszardzmija.shaledb.storage.StorageEngineException;
 import com.ryszardzmija.shaledb.storage.StorageEngineException.Operation;
 import com.ryszardzmija.shaledb.storage.StorageEngineException.Reason;
+import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentChannelCleanup;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -33,9 +34,12 @@ final class DatabaseLock implements AutoCloseable {
     private final Path directory;
     private final Path lockPath;
     private final DirectoryIdentity identity;
+    // The reservation keeps pending segment channels reachable even if open fails or a caller drops the engine.
+    private final SegmentChannelCleanup segmentCleanup = new SegmentChannelCleanup();
     private FileChannel channel;
     private FileLock fileLock;
-    private boolean closeAttempted;
+    private boolean released;
+    private Throwable unresolvedRelease;
 
     private DatabaseLock(Path directory, Object fileKey) {
         this.directory = directory;
@@ -94,6 +98,10 @@ final class DatabaseLock implements AutoCloseable {
         return directory;
     }
 
+    SegmentChannelCleanup segmentCleanup() {
+        return segmentCleanup;
+    }
+
     private void validateLockFile() throws IOException {
         try {
             if (!Files.readAttributes(lockPath, BasicFileAttributes.class, NOFOLLOW_LINKS).isRegularFile()) {
@@ -122,10 +130,13 @@ final class DatabaseLock implements AutoCloseable {
 
     @Override
     public synchronized void close() {
-        if (closeAttempted) {
+        if (released) {
             return;
         }
-        closeAttempted = true;
+        if (unresolvedRelease != null) {
+            throw failure(Operation.CLOSE, Reason.OWNERSHIP_IO,
+                    "Database ownership release remains uncertain at " + lockPath, unresolvedRelease);
+        }
 
         Throwable releaseFailure = null;
         try {
@@ -142,12 +153,11 @@ final class DatabaseLock implements AutoCloseable {
             }
             // A successful channel close also releases any lock that explicit release missed.
             OWNERS.remove(identity, this);
+            released = true;
         } catch (IOException | RuntimeException | Error e) {
-            if (releaseFailure == null) {
-                releaseFailure = e;
-            } else if (releaseFailure != e) {
-                releaseFailure.addSuppressed(e);
-            }
+            releaseFailure = SegmentChannelCleanup.suppress(releaseFailure, e);
+            // Java's channel-closed flag alone cannot establish that the native lock handle was released.
+            unresolvedRelease = releaseFailure;
         }
 
         if (releaseFailure instanceof Error e) {

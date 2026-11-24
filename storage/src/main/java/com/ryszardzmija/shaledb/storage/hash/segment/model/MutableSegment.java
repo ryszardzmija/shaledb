@@ -23,9 +23,17 @@ public class MutableSegment implements AutoCloseable {
     private final SegmentReader segmentReader;
     private final SegmentWriter segmentWriter;
     private final RecordWriter recordWriter;
+    private final SegmentChannelCleanup channelCleanup;
+    private boolean closeStarted;
 
     public MutableSegment(Path path, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig) {
+        this(path, segmentConfig, durabilityConfig, new SegmentChannelCleanup());
+    }
+
+    public MutableSegment(Path path, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig,
+                          SegmentChannelCleanup channelCleanup) {
         this.path = Objects.requireNonNull(path);
+        this.channelCleanup = Objects.requireNonNull(channelCleanup);
 
         FileChannel openedReadChannel = null;
         FileChannel openedWriteChannel = null;
@@ -41,13 +49,7 @@ public class MutableSegment implements AutoCloseable {
             this.recordWriter = new RecordWriter(writeChannel, new FileSystemSync(), segmentConfig.maxPayloadSize());
             this.segmentWriter = new SegmentWriter(recordWriter, index, durabilityConfig.durabilityMode());
         } catch (IOException | RuntimeException | Error e) {
-            try {
-                closeChannels(openedReadChannel, openedWriteChannel);
-            } catch (IOException | RuntimeException | Error cleanupFailure) {
-                if (e != cleanupFailure) {
-                    e.addSuppressed(cleanupFailure);
-                }
-            }
+            channelCleanup.closeAfterFailure(path, e, openedReadChannel, openedWriteChannel);
 
             if (e instanceof IndexBuildException ie) {
                 throw new SegmentIOException("Failed to create index for segment file " + path, ie);
@@ -109,16 +111,19 @@ public class MutableSegment implements AutoCloseable {
 
     @Override
     public void close() {
+        if (closeStarted) {
+            return;
+        }
+        closeStarted = true;
         try {
-            closeChannels(readChannel, writeChannel);
+            channelCleanup.close(path, readChannel, writeChannel);
         } catch (IOException e) {
             throw new SegmentIOException("Failed to close segment " + path, e);
         }
     }
 
-    private static void closeChannels(FileChannel readChannel, FileChannel writeChannel) throws IOException {
-        try (writeChannel; readChannel) {
-            // Close the read channel first and preserve a second close failure as suppressed.
-        }
+    /** Whether this segment has begun releasing its channels. */
+    public boolean closeStarted() {
+        return closeStarted;
     }
 }

@@ -27,14 +27,18 @@ import java.nio.file.Path;
 import java.util.*;
 
 public class HashIndexEngine implements StorageEngine {
+    private enum State { OPENING, OPEN, FAILED, CLOSED }
+
     private final DatabaseLock ownership;
+    private final SegmentChannelCleanup channelCleanup;
     private final RolloverPolicy rolloverPolicy;
     private final RolloverHandler rolloverHandler;
     private final long maxPayloadSize;
 
-    private final Deque<ImmutableSegment> immutableSegments;
+    private final ArrayList<ImmutableSegment> immutableSegments;
     private MutableSegment mutableSegment;
-    private boolean closed;
+    private State state = State.OPENING;
+    private Throwable failureCause;
 
     public HashIndexEngine(StorageConfig storageConfig) {
         Objects.requireNonNull(storageConfig);
@@ -42,31 +46,29 @@ public class HashIndexEngine implements StorageEngine {
         SegmentConfig segmentConfig = SegmentConfig.from(storageConfig);
         DurabilityConfig durabilityConfig = DurabilityConfig.from(storageConfig);
         this.ownership = DatabaseLock.acquire(storageConfig.segmentDir());
+        this.channelCleanup = ownership.segmentCleanup();
         Path segmentDir = ownership.directory();
 
-        boolean loadingSegments = false;
         try {
             NavigableMap<Long, Path> discovered = new SegmentFileDiscoverer(segmentDir).discoverSegmentFiles();
             Map.Entry<Long, Path> latest = discovered.lastEntry();
             FileSystemSync fileSystemSync = new FileSystemSync();
             SegmentFileFactory segmentFileFactory = new SegmentFileFactory(segmentDir, fileSystemSync,
-                    latest == null ? 0 : latest.getKey());
+                    latest == null ? 0 : latest.getKey(), channelCleanup);
             this.rolloverPolicy = new SizeBasedRolloverPolicy(segmentConfig.maxSegmentSize());
-            this.rolloverHandler = new RolloverHandler(segmentFileFactory, fileSystemSync, segmentConfig, durabilityConfig);
-            SegmentLoader segmentLoader = new SegmentLoader(segmentConfig, durabilityConfig);
+            this.rolloverHandler = new RolloverHandler(segmentFileFactory, fileSystemSync, segmentConfig,
+                    durabilityConfig, channelCleanup);
+            SegmentLoader segmentLoader = new SegmentLoader(segmentConfig, durabilityConfig, channelCleanup);
 
             SegmentLayout segmentLayout = latest == null
                     ? new SegmentLayout(List.of(), segmentFileFactory.createSegmentFile())
                     : new SegmentLayout(List.copyOf(discovered.headMap(latest.getKey(), false).values()), latest.getValue());
-            loadingSegments = true;
             LoadedSegments loadedSegments = segmentLoader.loadSegments(segmentLayout);
             this.immutableSegments = loadedSegments.immutableSegments();
             this.mutableSegment = loadedSegments.mutableSegment();
+            this.state = State.OPEN;
         } catch (RuntimeException | Error e) {
-            boolean segmentCleanupFailed = e instanceof SegmentFileException creationFailure
-                    ? creationFailure.segmentChannelCloseFailed()
-                    : loadingSegments && segmentLoadCleanupFailed(e);
-            if (!segmentCleanupFailed) {
+            if (!channelCleanup.hasPendingChannels()) {
                 ownership.closeAfterFailedOpen(e);
             }
             if (e instanceof SegmentFileException || e instanceof SegmentFileDiscoveryException
@@ -76,16 +78,6 @@ public class HashIndexEngine implements StorageEngine {
             }
             throw e;
         }
-    }
-
-    private static boolean segmentLoadCleanupFailed(Throwable failure) {
-        // Segment constructors and the loader preserve channel close failures on the startup cause chain.
-        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
-            if (cause.getSuppressed().length != 0) {
-                return true;
-            }
-        }
-        return false;
     }
 
     @Override
@@ -163,39 +155,40 @@ public class HashIndexEngine implements StorageEngine {
 
     @Override
     public void close() {
-        if (closed) {
-            return;
-        }
-        closed = true;
+        State previousState = state;
+        state = State.CLOSED;
 
         Throwable primaryFailure = null;
-        try {
-            mutableSegment.sync();
-        } catch (RuntimeException | Error e) {
-            primaryFailure = e;
-        }
-
-        boolean segmentCloseFailed = false;
-        try {
-            mutableSegment.close();
-        } catch (RuntimeException | Error e) {
-            segmentCloseFailed = true;
-            primaryFailure = retainFailure(primaryFailure, e);
-        }
-        for (ImmutableSegment segment : immutableSegments) {
+        if (previousState == State.OPEN) {
             try {
-                segment.close();
+                mutableSegment.sync();
             } catch (RuntimeException | Error e) {
-                segmentCloseFailed = true;
-                primaryFailure = retainFailure(primaryFailure, e);
+                primaryFailure = e;
             }
         }
+        primaryFailure = channelCleanup.retryPending(primaryFailure);
+        if (previousState != State.CLOSED) {
+            try {
+                mutableSegment.close();
+            } catch (RuntimeException | Error e) {
+                primaryFailure = SegmentChannelCleanup.suppress(primaryFailure, e);
+            }
+            mutableSegment = null;
+            for (ImmutableSegment segment : immutableSegments) {
+                try {
+                    segment.close();
+                } catch (RuntimeException | Error e) {
+                    primaryFailure = SegmentChannelCleanup.suppress(primaryFailure, e);
+                }
+            }
+            immutableSegments.clear();
+        }
 
-        if (!segmentCloseFailed) {
+        if (!channelCleanup.hasPendingChannels()) {
             try {
                 ownership.close();
             } catch (RuntimeException | Error e) {
-                primaryFailure = retainFailure(primaryFailure, e);
+                primaryFailure = SegmentChannelCleanup.suppress(primaryFailure, e);
             }
         }
         if (primaryFailure instanceof SegmentIOException e) {
@@ -209,25 +202,27 @@ public class HashIndexEngine implements StorageEngine {
         }
     }
 
-    private static Throwable retainFailure(Throwable primaryFailure, Throwable cleanupFailure) {
-        if (primaryFailure == null) {
-            return cleanupFailure;
-        }
-        if (primaryFailure != cleanupFailure) {
-            primaryFailure.addSuppressed(cleanupFailure);
-        }
-        return primaryFailure;
-    }
-
     private void handleRollover(Operation operation) {
         try {
             if (rolloverPolicy.shouldRollover(mutableSegment)) {
+                // Reserve room before the handler can retire the active segment.
+                immutableSegments.ensureCapacity(immutableSegments.size() + 1);
                 RolloverResult rolloverResult = rolloverHandler.rollOver(mutableSegment);
-                mutableSegment = rolloverResult.newMutableSegment();
                 immutableSegments.addFirst(rolloverResult.newImmutableSegment());
+                mutableSegment = rolloverResult.newMutableSegment();
             }
         } catch (SegmentIOException | RolloverException e) {
-            throw failure(operation, MutationOutcome.FORCE_COMPLETED, "Rollover check or handoff failed after mutation", e);
+            StorageEngineException failure = failure(operation, MutationOutcome.FORCE_COMPLETED,
+                    "Rollover check or handoff failed after mutation", e);
+            if (mutableSegment.closeStarted()) {
+                markFailed(failure);
+            }
+            throw failure;
+        } catch (RuntimeException | Error e) {
+            if (mutableSegment.closeStarted()) {
+                markFailed(e);
+            }
+            throw e;
         }
     }
 
@@ -266,8 +261,18 @@ public class HashIndexEngine implements StorageEngine {
     }
 
     private void requireOpen() {
-        if (closed) {
-            throw new IllegalStateException("Storage engine is closed");
+        switch (state) {
+            case OPEN -> { }
+            case FAILED -> throw new IllegalStateException("Storage engine has failed", failureCause);
+            case CLOSED -> throw new IllegalStateException("Storage engine is closed");
+            case OPENING -> throw new IllegalStateException("Storage engine is opening");
+        }
+    }
+
+    void markFailed(Throwable cause) {
+        if (state == State.OPEN) {
+            failureCause = Objects.requireNonNull(cause);
+            state = State.FAILED;
         }
     }
 }

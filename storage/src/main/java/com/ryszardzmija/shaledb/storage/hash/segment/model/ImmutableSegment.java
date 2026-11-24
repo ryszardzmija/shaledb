@@ -17,9 +17,12 @@ public class ImmutableSegment implements AutoCloseable {
     private final Path path;
     private final FileChannel readChannel;
     private final SegmentReader segmentReader;
+    private final SegmentChannelCleanup channelCleanup;
+    private boolean closeStarted;
 
-    public ImmutableSegment(Path path, SegmentConfig config) {
+    public ImmutableSegment(Path path, SegmentConfig config, SegmentChannelCleanup channelCleanup) {
         this.path = Objects.requireNonNull(path);
+        this.channelCleanup = Objects.requireNonNull(channelCleanup);
 
         FileChannel openedReadChannel = null;
         try {
@@ -29,15 +32,7 @@ public class ImmutableSegment implements AutoCloseable {
             Index index = new IndexBuilder(readChannel, config.maxPayloadSize()).build();
             this.segmentReader = new SegmentReader(new RecordReader(readChannel, config.maxPayloadSize()), index);
         } catch (IOException | RuntimeException | Error e) {
-            if (openedReadChannel != null) {
-                try {
-                    openedReadChannel.close();
-                } catch (IOException | RuntimeException | Error cleanupFailure) {
-                    if (e != cleanupFailure) {
-                        e.addSuppressed(cleanupFailure);
-                    }
-                }
-            }
+            channelCleanup.closeAfterFailure(path, e, openedReadChannel);
 
             if (e instanceof IndexBuildException ie) {
                 throw new SegmentIOException("Failed to create index for segment file " + path, ie);
@@ -71,8 +66,12 @@ public class ImmutableSegment implements AutoCloseable {
 
     @Override
     public void close() {
+        if (closeStarted) {
+            return;
+        }
+        closeStarted = true;
         try {
-            readChannel.close();
+            channelCleanup.close(path, readChannel);
         } catch (IOException e) {
             throw new SegmentIOException("Failed to close segment " + path, e);
         }

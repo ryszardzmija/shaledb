@@ -16,6 +16,8 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertFailure;
@@ -28,6 +30,7 @@ import static java.nio.file.StandardOpenOption.WRITE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -36,6 +39,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -163,6 +167,80 @@ class KeyValueStoreIoFailureTest {
     }
 
     @Test
+    void unexpectedRolloverFailureClosesTheUnpublishedSuccessor() throws IOException {
+        Path active = createSegment(1);
+        Path replacement = directory.resolve("segment_0000000000000000002.log");
+        FileChannel replacementReader = mock(FileChannel.class);
+        FileChannel replacementWriter = mock(FileChannel.class);
+        FileChannel directoryChannel = mock(FileChannel.class);
+        var failure = new AssertionError("unexpected conversion failure");
+        completeWrites();
+        try (MockedStatic<FileChannel> channels = mockChannels()) {
+            channels.when(() -> FileChannel.open(active, READ)).thenReturn(reader).thenThrow(failure);
+            channels.when(() -> FileChannel.open(active, WRITE)).thenReturn(writer);
+            createRealFileThroughMock(channels, replacement);
+            channels.when(() -> FileChannel.open(replacement, READ)).thenReturn(replacementReader);
+            channels.when(() -> FileChannel.open(replacement, WRITE)).thenReturn(replacementWriter);
+            channels.when(() -> FileChannel.open(directory, READ)).thenReturn(directoryChannel);
+            try (KeyValueStore store = open()) {
+                when(reader.size()).thenReturn(256L);
+                assertThatThrownBy(() -> store.put(KEY, VALUE)).isSameAs(failure);
+
+                verify(replacementReader).close();
+                verify(replacementWriter).close();
+                verify(reader, never()).close();
+                verify(writer, never()).close();
+                assertThat(replacement).doesNotExist();
+                assertThat(active).isRegularFile();
+                assertLocked();
+            }
+        }
+        try (KeyValueStore reopened = open()) {
+            assertThat(reopened.get(KEY)).isEmpty();
+        }
+    }
+
+    @Test
+    void rolloverRetirementFailureDisablesOperationsAndClosesUnpublishedViews() throws IOException {
+        Path active = createSegment(1);
+        Path replacement = directory.resolve("segment_0000000000000000002.log");
+        FileChannel replacementReader = mock(FileChannel.class);
+        FileChannel replacementWriter = mock(FileChannel.class);
+        FileChannel immutableReader = mock(FileChannel.class);
+        FileChannel directoryChannel = mock(FileChannel.class);
+        IOException closeFailure = new IOException("failed old writer close");
+        completeWrites();
+        doThrow(closeFailure).doNothing().when(writer).close();
+        when(writer.isOpen()).thenReturn(true);
+        try (MockedStatic<FileChannel> channels = mockChannels()) {
+            channels.when(() -> FileChannel.open(active, READ)).thenReturn(reader).thenReturn(immutableReader);
+            channels.when(() -> FileChannel.open(active, WRITE)).thenReturn(writer);
+            createRealFileThroughMock(channels, replacement);
+            channels.when(() -> FileChannel.open(replacement, READ)).thenReturn(replacementReader);
+            channels.when(() -> FileChannel.open(replacement, WRITE)).thenReturn(replacementWriter);
+            channels.when(() -> FileChannel.open(directory, READ)).thenReturn(directoryChannel);
+            try (KeyValueStore store = open()) {
+                when(reader.size()).thenReturn(256L);
+                StorageEngineException failure = assertFailure(() -> store.put(KEY, VALUE),
+                        Operation.PUT, Reason.STORAGE_IO, MutationOutcome.FORCE_COMPLETED);
+                assertThat(failure).hasRootCause(closeFailure);
+                assertThatIllegalStateException().isThrownBy(() -> store.get(KEY)).withCause(failure);
+                verify(immutableReader).close();
+                verify(replacementReader).close();
+                verify(replacementWriter).close();
+                assertThat(replacement).doesNotExist();
+                assertLocked();
+            }
+            verify(writer, times(2)).force(true);
+            verify(writer, times(2)).close();
+            verify(reader).close();
+        }
+        try (KeyValueStore reopened = open()) {
+            assertThat(reopened.get(KEY)).isEmpty();
+        }
+    }
+
+    @Test
     void failedStartupClosesTheCorruptSegmentAndOlderChannelsAndRetainsCleanupFailures() throws IOException {
         Path older = createSegment(1);
         Path active = createSegment(2);
@@ -177,6 +255,8 @@ class KeyValueStoreIoFailureTest {
         });
         doThrow(localCloseFailure).when(reader).close();
         doThrow(olderCloseFailure).when(olderReader).close();
+        when(reader.isOpen()).thenReturn(true);
+        when(olderReader.isOpen()).thenReturn(true);
 
         try (MockedStatic<FileChannel> channels = mockChannels()) {
             FileLock lock = stubOwnershipLock(channels);
@@ -199,6 +279,60 @@ class KeyValueStoreIoFailureTest {
     }
 
     @Test
+    void corruptHistoricalSegmentClosesAllRealChannelsOpenedBeforeIt() throws IOException {
+        Path corrupt = createSegment(1);
+        byte[] invalid = invalidHeader();
+        Files.write(corrupt, invalid);
+        Path older = createSegment(2);
+        Path newer = createSegment(3);
+        Path active = createSegment(4);
+        List<FileChannel> opened = new ArrayList<>();
+        try (MockedStatic<FileChannel> channels = mockChannels()) {
+            for (Path historical : List.of(newer, older, corrupt)) {
+                channels.when(() -> FileChannel.open(historical, READ)).thenAnswer(call -> {
+                    FileChannel channel = historical.getFileSystem().provider().newFileChannel(historical, Set.of(READ));
+                    opened.add(channel);
+                    return channel;
+                });
+            }
+            assertFailure(this::open, Operation.OPEN, Reason.STRUCTURAL_CORRUPTION, MutationOutcome.NOT_APPLICABLE);
+            assertThat(opened).hasSize(3).allMatch(channel -> !channel.isOpen());
+            channels.verify(() -> FileChannel.open(active, READ), never());
+        } finally {
+            for (FileChannel channel : opened) {
+                channel.close();
+            }
+        }
+
+        assertThat(Files.readAllBytes(corrupt)).containsExactly(invalid);
+        Files.write(corrupt, new byte[0]);
+        try (KeyValueStore reopened = open()) {
+            reopened.put(KEY, VALUE);
+            assertThat(reopened.get(KEY)).hasValueSatisfying(value -> assertThat(value).containsExactly(VALUE));
+        }
+    }
+
+    @Test
+    void startupReleasesOwnershipWhenCleanupReportsAnErrorButTheChannelIsClosed() throws IOException {
+        Path active = createSegment(1);
+        IOException openFailure = new IOException("failed segment write open");
+        IOException closeFailure = new IOException("read close reported an error after closing");
+        when(reader.isOpen()).thenReturn(false);
+        doThrow(closeFailure).when(reader).close();
+        try (MockedStatic<FileChannel> channels = mockChannels()) {
+            channels.when(() -> FileChannel.open(active, READ)).thenReturn(reader);
+            channels.when(() -> FileChannel.open(active, WRITE)).thenThrow(openFailure);
+            StorageEngineException failure = assertFailure(this::open, Operation.OPEN,
+                    Reason.STORAGE_IO, MutationOutcome.NOT_APPLICABLE);
+            assertThat(failure).hasRootCause(openFailure);
+            assertThat(openFailure.getSuppressed()).containsExactly(closeFailure);
+        }
+        try (KeyValueStore reopened = open()) {
+            assertThat(reopened.get(KEY)).isEmpty();
+        }
+    }
+
+    @Test
     void closeKeepsForceFailurePrimaryAndAttemptsEveryChannelClose() throws IOException {
         Path older = createSegment(1);
         Path active = createSegment(2);
@@ -211,6 +345,7 @@ class KeyValueStoreIoFailureTest {
         doThrow(readerFailure).when(reader).close();
         doThrow(writerFailure).when(writer).close();
         doThrow(olderFailure).when(olderReader).close();
+        when(writer.isOpen()).thenReturn(true);
         KeyValueStore store;
         FileLock lock;
         try (MockedStatic<FileChannel> channels = mockChannels()) {
@@ -253,6 +388,59 @@ class KeyValueStoreIoFailureTest {
         assertThat(assertFailure(store::close, Operation.CLOSE, Reason.STORAGE_IO, MutationOutcome.NOT_APPLICABLE))
                 .hasRootCause(closeFailure);
         verify(reader).close();
+        try (KeyValueStore reopened = open()) {
+            store.close();
+            assertLocked();
+            assertThat(reopened.get(KEY)).isEmpty();
+        }
+        verify(writer).close();
+    }
+
+    @Test
+    void repeatedCloseRetriesOnlyOutstandingChannelsAndReleasesOwnershipWhenSafe() throws IOException {
+        Path oldest = createSegment(1);
+        Path newer = createSegment(2);
+        Path active = createSegment(3);
+        FileChannel oldestReader = mock(FileChannel.class);
+        FileChannel newerReader = mock(FileChannel.class);
+        IOException activeFailure = new IOException("appender remains open");
+        IOException newerFailure = new IOException("historical channel reported a close error");
+        IOException retryFailure = new IOException("appender still open after retry");
+        doThrow(newerFailure).when(newerReader).close();
+        when(newerReader.isOpen()).thenReturn(false);
+        doThrow(activeFailure).doThrow(retryFailure).doNothing().when(writer).close();
+        when(writer.isOpen()).thenReturn(true);
+        KeyValueStore store;
+        try (MockedStatic<FileChannel> channels = mockChannels()) {
+            channels.when(() -> FileChannel.open(oldest, READ)).thenReturn(oldestReader);
+            channels.when(() -> FileChannel.open(newer, READ)).thenReturn(newerReader);
+            channels.when(() -> FileChannel.open(active, READ)).thenReturn(reader);
+            channels.when(() -> FileChannel.open(active, WRITE)).thenReturn(writer);
+            store = open();
+        }
+
+        StorageEngineException first = assertFailure(store::close, Operation.CLOSE,
+                Reason.STORAGE_IO, MutationOutcome.NOT_APPLICABLE);
+        assertThat(first).hasRootCause(activeFailure);
+        assertThat(first.getCause().getSuppressed()).singleElement().satisfies(e -> assertThat(e).hasCause(newerFailure));
+        verify(oldestReader).close();
+        assertLocked();
+        assertThatIllegalStateException().isThrownBy(() -> store.get(KEY));
+
+        assertThat(assertFailure(store::close, Operation.CLOSE, Reason.STORAGE_IO, MutationOutcome.NOT_APPLICABLE))
+                .hasRootCause(retryFailure);
+        assertLocked();
+        store.close();
+        try (KeyValueStore reopened = open()) {
+            store.close();
+            assertLocked();
+            assertThat(reopened.get(KEY)).isEmpty();
+        }
+        verify(writer, times(3)).close();
+        verify(writer).force(true);
+        verify(reader).close();
+        verify(newerReader).close();
+        verify(oldestReader).close();
     }
 
     @Test
@@ -348,6 +536,7 @@ class KeyValueStoreIoFailureTest {
         IOException closeFailure = new IOException("failed new file close");
         doThrow(forceFailure).when(newFile).force(true);
         doThrow(closeFailure).when(newFile).close();
+        when(newFile.isOpen()).thenReturn(true);
         try (MockedStatic<FileChannel> channels = mockChannels()) {
             FileLock lock = stubOwnershipLock(channels);
             channels.when(() -> FileChannel.open(first, WRITE, CREATE_NEW)).thenAnswer(call -> {
