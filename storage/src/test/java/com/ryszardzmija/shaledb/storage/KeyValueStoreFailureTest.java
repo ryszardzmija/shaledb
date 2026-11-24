@@ -113,9 +113,8 @@ class KeyValueStoreFailureTest {
         Path missing = directory.resolve("missing-directory");
         StorageConfig config = new StorageConfig(256, 128, missing, DurabilityMode.SYNC_EACH_WRITE);
 
-        StorageEngineException failure = openFailure(config, Reason.STORAGE_IO);
+        StorageEngineException failure = openFailure(config, Reason.OWNERSHIP_IO);
 
-        assertThat(failure.getCause()).isInstanceOf(SegmentFileDiscoveryException.class);
         assertThat(failure).hasRootCauseInstanceOf(NoSuchFileException.class);
         assertThat(missing).doesNotExist();
     }
@@ -173,7 +172,7 @@ class KeyValueStoreFailureTest {
             assertValue(store, KEY, replacement);
         }
         try (var files = Files.list(directory)) {
-            assertThat(files).containsExactly(last);
+            assertThat(files).containsExactlyInAnyOrder(last, directory.resolve("LOCK"));
         }
         try (KeyValueStore store = new KeyValueStore(smallSegments)) {
             assertValue(store, KEY, replacement);

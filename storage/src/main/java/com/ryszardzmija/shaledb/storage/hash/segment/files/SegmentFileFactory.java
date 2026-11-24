@@ -44,10 +44,14 @@ public class SegmentFileFactory {
             throw new SegmentFileException("Failed to create a segment file " + segmentPath, e);
         }
 
+        boolean fileForceCompleted = false;
+        boolean segmentChannelClosed = false;
         try {
             try (channel) {
                 fileSystemSync.forceFile(channel);
+                fileForceCompleted = true;
             }
+            segmentChannelClosed = true;
             try {
                 fileSystemSync.forceDirectory(segmentDir);
             } catch (UncheckedIOException e) {
@@ -55,8 +59,10 @@ public class SegmentFileFactory {
                 throw new SegmentFileException("Failed to close the directory after publishing " + segmentPath, e);
             }
         } catch (IOException | UncheckedIOException | DurabilityException | UnsupportedOperationException | SecurityException e) {
+            // Measure this before deletion and directory force can add their own suppressed failures.
+            boolean closeFailed = !segmentChannelClosed && (fileForceCompleted || e.getSuppressed().length != 0);
             discardFailedCreation(segmentPath, e);
-            throw new SegmentFileException("Failed to flush segment file creation: " + segmentPath, e);
+            throw new SegmentFileException("Failed to flush segment file creation: " + segmentPath, e, closeFailed);
         }
         return segmentPath;
     }

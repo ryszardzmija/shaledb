@@ -153,7 +153,8 @@ class KeyValueStoreValidationTest {
     private Map<String, String> segmentContents() throws IOException {
         Map<String, String> contents = new HashMap<>();
         try (var files = Files.list(tempDir)) {
-            for (Path file : files.toList()) {
+            // Opening and closing another channel to LOCK can release this JVM's file lock.
+            for (Path file : files.filter(path -> !path.getFileName().toString().equals("LOCK")).toList()) {
                 contents.put(file.getFileName().toString(), HexFormat.of().formatHex(Files.readAllBytes(file)));
             }
         }

@@ -15,10 +15,11 @@ public class KeyValueStore implements AutoCloseable {
     private final StorageEngine storageEngine;
 
     /**
-     * Opens the store and rebuilds its indexes from the existing segments.
+     * Acquires exclusive ownership of the existing database directory and rebuilds its segment indexes.
      *
      * @throws NullPointerException if the storage config is null
-     * @throws StorageEngineException if the segments cannot be discovered, created or fully loaded
+     * @throws StorageEngineException if ownership cannot be acquired or segments cannot be discovered,
+     *                                created or fully loaded
      */
     public KeyValueStore(StorageConfig storageConfig) {
         Objects.requireNonNull(storageConfig);

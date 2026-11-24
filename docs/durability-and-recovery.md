@@ -10,9 +10,11 @@ ShaleDB persists the append history. On open it accepts every complete record th
 | Write record | `RecordWriter.write` has transferred the entire byte buffer and returned the starting offset and encoded size. File content may still be cached. Force and index publication follow the transfer. |
 | Force file | `SYNC_EACH_WRITE` is the only defined mode. `forceFile` calls `FileChannel.force(true)` on the append channel, requesting persistence of contents and metadata. Success is the engine's durability boundary for that mutation, conditional on the storage stack honoring the call. |
 | Publish and return | `SegmentWriter` records the new offset or deleted marker in memory. The engine then queries size and may roll over. A normal embedded return follows. A remote client must additionally receive a successful RPC completion. |
-| Close and reopen | Close attempts another force of the active file, then closes active and immutable channels. Reopen validates the layout, orders files by numeric ID and fully replays them. A complete compatible history yields the same map after an ordinary reopen. |
+| Close and reopen | Close attempts another force of the active file, then closes active and immutable channels before releasing ownership. Reopen acquires ownership before validating the layout, ordering files by numeric ID and replaying them. A complete compatible history yields the same map after an ordinary reopen. |
 
 The policy requires one force per mutation, an additional old-file force during rollover, and the active-file force on close. Initial and rollover creation each require their own file force followed by a directory force. Segment publication assumes that the configured directory and its ancestors are already durable. [FileSystemSync](../storage/src/main/java/com/ryszardzmija/shaledb/storage/durability/FileSystemSync.java) · [SegmentFileFactory](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/files/SegmentFileFactory.java) · [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java)
+
+The `LOCK` file provides runtime coordination and carries no recovery metadata. Ownership requires no force on that file. Segment publication retains its file and directory barriers. [Concurrency and lifecycle](concurrency-and-lifecycle.md)
 
 ## Failure windows
 
@@ -35,7 +37,7 @@ The table follows **one serialized mutation** with an initially readable history
 | Event | Recovery implications |
 | --- | --- |
 | Normal shutdown and reopen | With complete writer/reader-compatible history, stable names and exclusive access, reconstruction replays the same logical order. A clean shutdown cannot make an oversized record acceptable or repair an already malformed tail. |
-| Unexpected process termination | JVM indexes and channels are lost. The OS and its page cache may survive, so even an unforced complete record may be visible to a new process. No shutdown hook or close is required to make an already forced record replayable. |
+| Unexpected process termination | The OS releases the file lock and leaves the `LOCK` entry available to reuse. JVM indexes are lost. The OS and its page cache may survive, so even an unforced complete record may be visible to the next owner. Replay still requires a complete, compatible segment history. |
 | Operating-system crash | Volatile OS cache can be lost. Survival of previously forced file data and necessary directory entries depends on the local filesystem's persistence semantics. A write in progress has no whole-record atomicity guarantee. |
 | Power loss | Filesystem guarantees additionally depend on controller/device cache flushes and write ordering surviving loss of power. The code cannot observe whether a device honored a successful force. Unforced writes and newly created ancestors are uncertain. |
 | Filesystem or device failure | Open, append, force, read and cleanup may independently fail. Neither another force nor a new process guarantees recovery. Damage can affect previously acknowledged records or the directory itself. |

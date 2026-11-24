@@ -24,6 +24,7 @@ public class SegmentFileDiscoverer {
     /**
      * Returns validated segment paths ordered by ID, oldest first. An empty result means the
      * directory was read successfully and contains no segment entries.
+     * The ownership entry {@code LOCK} is outside the reserved segment namespace.
      */
     public NavigableMap<Long, Path> discoverSegmentFiles() {
         NavigableMap<Long, Path> segments = new TreeMap<>();

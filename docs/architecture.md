@@ -15,10 +15,12 @@ flowchart TD
     Embedded[Embedded caller] --> Facade
     Config --> Facade
     Facade --> Engine[StorageEngine / HashIndexEngine]
+    Engine --> Lock[DatabaseLock]
     Engine --> Layout[Discovery, loader and rollover]
     Engine --> Active[One mutable segment]
     Engine --> Older[Newest-first immutable segments]
     Layout --> Files[(Segment directory)]
+    Lock --> Files
     Active --> ActiveIndex[Index for the active file]
     Older --> OldIndexes[One index per older file]
     Active --> Codec[Record reader and writer]
@@ -35,7 +37,7 @@ flowchart TD
 | `server` | `Application` owns configuration loading, directory preparation, store, executor and gRPC process lifecycle. Its service adapts messages, observer callbacks and exceptions to Java calls. [Application](../server/src/main/java/com/ryszardzmija/shaledb/server/Application.java) |
 | `storage` public surface | `KeyValueStore` owns a `StorageEngine`, forwards synchronous operations, logs and rethrows engine exceptions and supports try-with-resources. Its constructor always selects `HashIndexEngine`. [KeyValueStore](../storage/src/main/java/com/ryszardzmija/shaledb/storage/KeyValueStore.java) |
 | `storage.config` and `durability` | Map required settings to immutable records. `FileSystemSync` performs the file and directory force calls. The installed policy is sync on each write. [StorageConfigMapper](../storage/src/main/java/com/ryszardzmija/shaledb/storage/config/StorageConfigMapper.java) · [FileSystemSync](../storage/src/main/java/com/ryszardzmija/shaledb/storage/durability/FileSystemSync.java) |
-| `hash` and `hash.segment` | The engine owns the mutable reference and immutable deque. `files` selects and creates names, `loader` opens the layout, `model` owns channels and indexes, `rollover` decides when and how to change roles. [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java) · [SegmentLoader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/loader/SegmentLoader.java) · [RolloverHandler](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/rollover/RolloverHandler.java) |
+| `hash` and `hash.segment` | The engine holds exclusive directory ownership, the mutable segment and the immutable deque. `files` selects and creates names, `loader` opens the layout, `model` owns channels and indexes, `rollover` decides when and how to change roles. [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java) · [DatabaseLock](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/DatabaseLock.java) · [SegmentLoader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/loader/SegmentLoader.java) · [RolloverHandler](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/rollover/RolloverHandler.java) |
 | `hash.index` | An owned copy of the key plus an offset or deletion marker is retained per segment. Indexes exist only in memory and can be reconstructed from records. [HashIndex](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/HashIndex.java) · [IndexBuilder](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/IndexBuilder.java) |
 | `serialization` | `record` represents binary payloads and types. `spec` defines field widths, byte order and type codes. `io` turns records into channel writes and validates positional reads. [RecordWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordWriter.java) · [RecordReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordReader.java) |
 
@@ -43,7 +45,7 @@ At build time `server_lib` depends on both `//api:api` and `//storage:storage`. 
 
 ## Opening a store
 
-The constructor discovers and validates the segment layout in one directory scan. The greatest numeric ID determines the active segment and seeds the factory's allocation counter. When the layout is empty, the factory creates and synchronizes the first file. The loader opens older segments newest first and the active segment last. Each open scans its file from start to end, building a fresh index of key states and discarding decoded values. The engine takes ownership of the resulting segment objects only after the load succeeds. Reopening uses this same path. [Segment management](segment-management.md) · [Indexing](indexing.md)
+The constructor first acquires exclusive ownership of the configured segment directory. Under that lock it discovers and validates the layout in one directory scan. The greatest numeric ID determines the active segment and seeds the factory's allocation counter. When the layout is empty, the factory creates and synchronizes the first file. The loader opens older segments newest first and the active segment last, building a fresh index for each file. Successful construction retains both the lock and the loaded segments. Close releases ownership after segment cleanup. [Concurrency and lifecycle](concurrency-and-lifecycle.md) · [Segment management](segment-management.md) · [Indexing](indexing.md)
 
 ## Put and delete
 

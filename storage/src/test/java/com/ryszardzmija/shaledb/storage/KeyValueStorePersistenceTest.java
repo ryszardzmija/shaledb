@@ -171,7 +171,7 @@ class KeyValueStorePersistenceTest {
         }
         Path successor = tempDir.resolve("segment_0000000000000000101.log");
         try (var files = Files.list(tempDir)) {
-            assertThat(files).containsExactlyInAnyOrder(oldest, tombstones, active, successor);
+            assertThat(files).containsExactlyInAnyOrder(oldest, tombstones, active, successor, tempDir.resolve("LOCK"));
         }
         assertThat(Files.readAllBytes(oldest)).containsExactly(oldestBytes);
         assertThat(Files.readAllBytes(tombstones)).containsExactly(tombstoneBytes);
