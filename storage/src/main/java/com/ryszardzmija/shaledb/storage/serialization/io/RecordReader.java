@@ -40,11 +40,8 @@ public class RecordReader {
             int keyDataSize = headerBuffer.getInt();
             int valueDataSize = headerBuffer.getInt();
 
-            if (!arePayloadLengthsValid(keyDataSize, valueDataSize)) {
-                throw new DataCorruptionException("Retrieved record length is invalid", offset);
-            }
-
-            ByteBuffer dataBuffer = ByteBuffer.allocate(keyDataSize + valueDataSize).order(FormatInfo.BYTE_ORDER);
+            int payloadSize = readPayloadSize(recordType, keyDataSize, valueDataSize, offset);
+            ByteBuffer dataBuffer = ByteBuffer.allocate(payloadSize).order(FormatInfo.BYTE_ORDER);
             readIntoBuffer(dataBuffer, offset + FormatInfo.getHeaderSize());
 
             headerBuffer.rewind();
@@ -63,7 +60,7 @@ public class RecordReader {
             dataBuffer.get(keyData);
             dataBuffer.get(valueData);
 
-            long nextRecordOffset = offset + FormatInfo.getHeaderSize() + keyDataSize + valueDataSize;
+            long nextRecordOffset = offset + FormatInfo.getEncodedRecordSize(payloadSize);
 
             return new ReadResult(new RecordPayload(keyData, valueData), recordType, nextRecordOffset);
         } catch (BufferUnderflowException e) {
@@ -84,8 +81,12 @@ public class RecordReader {
         }
     }
 
-    private boolean arePayloadLengthsValid(int keyDataSize, int valueDataSize) {
-        return keyDataSize > 0 && valueDataSize >= 0 && (long) keyDataSize + valueDataSize <= maxPayloadSize;
+    private int readPayloadSize(RecordType type, int keyLength, int valueLength, long offset) {
+        try {
+            return FormatInfo.getPayloadSize(type, keyLength, valueLength, maxPayloadSize);
+        } catch (IllegalArgumentException e) {
+            throw new DataCorruptionException(e.getMessage(), offset, e);
+        }
     }
 
     private boolean isChecksumValid(byte[] storedChecksum, Checksum computedChecksum) {

@@ -92,11 +92,21 @@ class RecordSerializationTest {
     void roundTripsPayloadAtConfiguredMaximum() throws IOException {
         byte[] key = hex("010203");
         byte[] value = hex("0405060708");
-        Path path = writeRecord(new RecordPayload(key, value), RecordType.NORMAL);
+        Path path = writeRecord(new RecordPayload(key, value), RecordType.NORMAL, 8);
 
         ReadResult result = readFirstRecord(path, 8);
 
         assertRecord(result, RecordType.NORMAL, key, value, 21);
+    }
+
+    @Test
+    void roundTripsTombstoneAtConfiguredMaximum() throws IOException {
+        byte[] key = hex("0080ff0102030405");
+        Path path = writeRecord(RecordPayload.forTombstone(key), RecordType.TOMBSTONE, 8);
+
+        ReadResult result = readFirstRecord(path, 8);
+
+        assertRecord(result, RecordType.TOMBSTONE, key, new byte[0], 21);
     }
 
     @Test
@@ -111,7 +121,7 @@ class RecordSerializationTest {
         Path path = tempDir.resolve("consecutive.data");
 
         try (FileChannel channel = FileChannel.open(path, CREATE_NEW, APPEND)) {
-            RecordWriter writer = new RecordWriter(channel, new FileSystemSync());
+            RecordWriter writer = new RecordWriter(channel, new FileSystemSync(), MAX_PAYLOAD_SIZE);
 
             WriteResult first = writer.write(new WriteRequest(firstPayload, RecordType.NORMAL));
             WriteResult second = writer.write(new WriteRequest(secondPayload, RecordType.NORMAL));
@@ -133,9 +143,13 @@ class RecordSerializationTest {
     }
 
     private Path writeRecord(RecordPayload payload, RecordType type) throws IOException {
+        return writeRecord(payload, type, MAX_PAYLOAD_SIZE);
+    }
+
+    private Path writeRecord(RecordPayload payload, RecordType type, long maxPayloadSize) throws IOException {
         Path path = tempDir.resolve("record.data");
         try (FileChannel channel = FileChannel.open(path, CREATE_NEW, APPEND)) {
-            new RecordWriter(channel, new FileSystemSync()).write(new WriteRequest(payload, type));
+            new RecordWriter(channel, new FileSystemSync(), maxPayloadSize).write(new WriteRequest(payload, type));
         }
         return path;
     }

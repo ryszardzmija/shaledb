@@ -12,6 +12,8 @@ import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoader;
 import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoadingException;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.*;
 import com.ryszardzmija.shaledb.storage.hash.segment.rollover.*;
+import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
+import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,12 +24,14 @@ public class HashIndexEngine implements StorageEngine {
 
     private final RolloverPolicy rolloverPolicy;
     private final RolloverHandler rolloverHandler;
+    private final long maxPayloadSize;
 
     private final Deque<ImmutableSegment> immutableSegments;
     private MutableSegment mutableSegment;
 
     public HashIndexEngine(StorageConfig storageConfig) {
         Objects.requireNonNull(storageConfig);
+        this.maxPayloadSize = storageConfig.maxPayloadSize();
 
         try {
             SegmentConfig segmentConfig = SegmentConfig.from(storageConfig);
@@ -50,12 +54,11 @@ public class HashIndexEngine implements StorageEngine {
 
     @Override
     public void put(byte[] key, byte[] value) {
-        if (key == null || key.length == 0) {
-            throw new IllegalArgumentException("Key must not be null or empty");
-        }
+        validateKey(key);
         if (value == null) {
             throw new IllegalArgumentException("Value must not be null");
         }
+        FormatInfo.getPayloadSize(RecordType.NORMAL, key.length, value.length, maxPayloadSize);
 
         try {
             mutableSegment.put(new ByteKey(key), value);
@@ -76,10 +79,7 @@ public class HashIndexEngine implements StorageEngine {
 
     @Override
     public Optional<byte[]> get(byte[] key) {
-        if (key == null || key.length == 0) {
-            throw new IllegalArgumentException("Key must not be null or empty");
-        }
-
+        validateKey(key);
         ByteKey byteKey = new ByteKey(key);
 
         try {
@@ -113,14 +113,13 @@ public class HashIndexEngine implements StorageEngine {
      * they are still accumulated on the disk.
      *
      * @param key a non-empty array of bytes representing the key
-     * @throws IllegalArgumentException if the key is null or empty
+     * @throws IllegalArgumentException if the key is null, empty, or exceeds the payload limit
      * @throws StorageEngineException if the key-value pair associated with the key fails to be deleted
      */
     @Override
     public void delete(byte[] key) {
-        if (key == null || key.length == 0) {
-            throw new IllegalArgumentException("Key must not be null or empty");
-        }
+        validateKey(key);
+        FormatInfo.getPayloadSize(RecordType.TOMBSTONE, key.length, 0, maxPayloadSize);
 
         try {
             mutableSegment.delete(new ByteKey(key));
@@ -160,6 +159,12 @@ public class HashIndexEngine implements StorageEngine {
             RolloverResult rolloverResult = rolloverHandler.rollOver(mutableSegment);
             mutableSegment = rolloverResult.newMutableSegment();
             immutableSegments.addFirst(rolloverResult.newImmutableSegment());
+        }
+    }
+
+    private static void validateKey(byte[] key) {
+        if (key == null || key.length == 0) {
+            throw new IllegalArgumentException("Key must not be null or empty");
         }
     }
 }

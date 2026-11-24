@@ -90,4 +90,14 @@ class StorageConfigMapperTest {
                 .hasCauseInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Invalid storage configuration");
     }
+
+    @Test
+    void wrapsRecordSizeIncompatibilityDuringMapping() {
+        StorageConfigDto config = new StorageConfigDto(16396L, VALID_MAX_PAYLOAD_SIZE, VALID_SEGMENT_DIR, VALID_DURABILITY_MODE);
+
+        assertThatThrownBy(() -> mapper.toStorageConfig(config))
+                .isInstanceOf(StorageConfigException.class)
+                .hasCauseInstanceOf(IllegalArgumentException.class)
+                .hasRootCauseMessage("Encoded record size 16397 for maxPayloadSize 16384 exceeds maxSegmentSize 16396");
+    }
 }

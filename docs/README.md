@@ -2,7 +2,7 @@
 
 ShaleDB stores binary keys and values in a local directory. Each change appends a record. An in-memory index for each file lets the engine find a value without replaying the log on every read. The same engine serves embedded Java callers and a small gRPC server.
 
-**Source revision** `8e1b64bd8205d3f99edc35145d76fc619a01a905` (the commit titled `test: add serialization tests`). This guide describes the code and tests at that revision. The [project overview](../README.md) gives the build and run commands. The [engineering guidelines](../AGENTS.md) state the project's storage invariants.
+This guide covers the storage engine through M1.02, including the M1.01 integration tests and the record validation introduced in M1.02. The [project overview](../README.md) gives the build and run commands. The [engineering guidelines](../AGENTS.md) state the project's storage invariants.
 
 ## Reading order
 
@@ -25,4 +25,4 @@ Descriptions of **current behavior** follow method bodies, including the excepti
 
 An **invariant** is a property the design needs to preserve. An **assumption** identifies something a caller or the environment must supply. **Guarantees** are qualified by those conditions. A **correctness defect** identifies a path that conflicts with a stated invariant or contract. A **failure mode** describes an outcome and the conditions under which it can occur. A **limitation** describes a boundary of cost or supported use.
 
-The verification chapter identifies the test cases and two additional runtime observations. Findings about crash outcomes follow from static inspection and their stated assumptions. Alternatives and open questions describe design choices that remain undecided. [Verification evidence](testing.md)
+The verification chapter identifies the test cases and their limits. Findings about crash outcomes follow from static inspection and their stated assumptions. Alternatives and open questions describe design choices that remain undecided. [Verification evidence](testing.md)

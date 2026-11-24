@@ -7,6 +7,7 @@ import java.nio.ByteOrder;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
 class RecordFormatTest {
     @Test
@@ -36,5 +37,63 @@ class RecordFormatTest {
     void rejectsUnknownTypeIdentifier() {
         assertThatExceptionOfType(TypeDecodingException.class).isThrownBy(() -> RecordTypeCodec.decode((byte) 127))
                 .withMessage("Unknown record type: 127");
+    }
+
+    @Test
+    void countsKeyValueAndHeaderBytes() {
+        int payloadSize = FormatInfo.getPayloadSize(RecordType.NORMAL, 3, 2, 5);
+
+        assertThat(payloadSize).isEqualTo(5);
+        assertThat(FormatInfo.getEncodedRecordSize(payloadSize)).isEqualTo(18);
+    }
+
+    @Test
+    void countsMinimumEmptyValueAndTombstoneRecords() {
+        int minimumPayloadSize = FormatInfo.getPayloadSize(RecordType.NORMAL, 1, 0, 1);
+        int emptyValuePayloadSize = FormatInfo.getPayloadSize(RecordType.NORMAL, 4, 0, 4);
+        int tombstonePayloadSize = FormatInfo.getPayloadSize(RecordType.TOMBSTONE, 4, 0, 4);
+
+        assertThat(minimumPayloadSize).isOne();
+        assertThat(FormatInfo.getEncodedRecordSize(minimumPayloadSize)).isEqualTo(14);
+        assertThat(emptyValuePayloadSize).isEqualTo(4);
+        assertThat(tombstonePayloadSize).isEqualTo(4);
+        assertThat(FormatInfo.getEncodedRecordSize(emptyValuePayloadSize)).isEqualTo(17);
+        assertThat(FormatInfo.getEncodedRecordSize(tombstonePayloadSize)).isEqualTo(17);
+    }
+
+    @Test
+    void rejectsInvalidLengthsBeforeAddingThem() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> FormatInfo.getPayloadSize(RecordType.NORMAL, -1, 2, 5))
+                .withMessageContaining("key length must be positive: -1");
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> FormatInfo.getPayloadSize(RecordType.NORMAL, 0, 2, 5))
+                .withMessageContaining("key length must be positive: 0");
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> FormatInfo.getPayloadSize(RecordType.NORMAL, 2, -1, 5))
+                .withMessageContaining("value length must not be negative: -1");
+    }
+
+    @Test
+    void rejectsPayloadSumsLargerThanAnIntEvenWithALargerBudget() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> FormatInfo.getPayloadSize(RecordType.NORMAL, Integer.MAX_VALUE, 1, Long.MAX_VALUE))
+                .withMessageContaining("2147483648")
+                .withMessageContaining("representable range");
+    }
+
+    @Test
+    void requiresRoomForHeaderWithinTheIntegerRepresentation() {
+        int largestPayload = Integer.MAX_VALUE - 13;
+        int payloadSize = FormatInfo.getPayloadSize(RecordType.NORMAL, 1, largestPayload - 1, largestPayload);
+
+        assertThat(payloadSize).isEqualTo(largestPayload);
+        assertThat(FormatInfo.getEncodedRecordSize(payloadSize)).isEqualTo(Integer.MAX_VALUE);
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> FormatInfo.getPayloadSize(RecordType.NORMAL, largestPayload, 1, Long.MAX_VALUE))
+                .withMessageContaining("representable range");
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> FormatInfo.getEncodedRecordSize(largestPayload + 1L))
+                .withMessageContaining("representable range");
     }
 }

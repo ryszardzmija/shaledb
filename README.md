@@ -57,7 +57,7 @@ Writes are append-only. A `put` writes a normal record, while a `delete` writes 
 
 Each segment has an in-memory hash index that maps keys to offsets in the segment file. Reads check the mutable segment first, then immutable segments from newest to oldest, so the newest record for a key wins. This matters for deletes: a tombstone in a newer segment must shadow an older value.
 
-Records include a CRC32C checksum, record type, key length, value length, key bytes, and value bytes. During reads and startup index rebuilds, invalid record types, oversized payloads, truncated records, and checksum mismatches are treated as corruption.
+Records include a CRC32C checksum, record type, key length, value length, key bytes, and value bytes. Reads, writes, and startup index rebuilds enforce the same record structure and payload limit. The engine rejects invalid mutations before append, and reads check for truncated records and checksum mismatches.
 
 The current durability mode is `SYNC_EACH_WRITE`. Each write is flushed before the in-memory index is updated, which gives the engine a simple recovery boundary.
 

@@ -42,7 +42,7 @@ public class MutableSegment implements AutoCloseable {
             this.writeChannel = openedWriteChannel;
             this.segmentReader = new SegmentReader(new RecordReader(readChannel, segmentConfig.maxPayloadSize()), index, segmentConfig.maxSegmentSize());
 
-            this.recordWriter = new RecordWriter(writeChannel, new FileSystemSync());
+            this.recordWriter = new RecordWriter(writeChannel, new FileSystemSync(), segmentConfig.maxPayloadSize());
             this.segmentWriter = new SegmentWriter(recordWriter, index, durabilityConfig.durabilityMode());
         } catch (IndexBuildException | IOException e) {
             if (openedReadChannel != null) {

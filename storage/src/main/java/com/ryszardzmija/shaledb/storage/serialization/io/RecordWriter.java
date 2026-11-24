@@ -17,22 +17,28 @@ import java.util.zip.Checksum;
 public class RecordWriter {
     private final FileChannel writeChannel;
     private final FileSystemSync fileSystemSync;
+    private final long maxPayloadSize;
 
-    public RecordWriter(FileChannel writeChannel, FileSystemSync fileSystemSync) {
+    public RecordWriter(FileChannel writeChannel, FileSystemSync fileSystemSync, long maxPayloadSize) {
         this.writeChannel = Objects.requireNonNull(writeChannel);
         this.fileSystemSync = Objects.requireNonNull(fileSystemSync);
+        this.maxPayloadSize = maxPayloadSize;
     }
 
     public WriteResult write(WriteRequest request) {
+        if (request == null || request.payload() == null) {
+            throw new IllegalArgumentException("Write request and record payload must not be null");
+        }
+        RecordPayload recordPayload = request.payload();
+        RecordType recordType = request.type();
+        int keyLength = recordPayload.key().length;
+        int valueLength = recordPayload.value().length;
+        int payloadSize = FormatInfo.getPayloadSize(recordType, keyLength, valueLength, maxPayloadSize);
+        int encodedRecordSize = FormatInfo.getEncodedRecordSize(payloadSize);
+        byte encodedType = RecordTypeCodec.encode(recordType);
+
         try {
-            RecordPayload recordPayload = request.payload();
-            RecordType recordType = request.type();
-
-            int keyLength = recordPayload.key().length;
-            int valueLength = recordPayload.value().length;
-            byte encodedType = RecordTypeCodec.encode(recordType);
-
-            ByteBuffer buffer = ByteBuffer.allocate(FormatInfo.getHeaderSize() + keyLength + valueLength).order(FormatInfo.BYTE_ORDER);
+            ByteBuffer buffer = ByteBuffer.allocate(encodedRecordSize).order(FormatInfo.BYTE_ORDER);
 
             ByteBuffer checksumHeaderFields = ByteBuffer.allocate(FormatInfo.getChecksumHeaderFieldsSize()).order(FormatInfo.BYTE_ORDER);
             checksumHeaderFields.put(encodedType);
@@ -47,8 +53,8 @@ public class RecordWriter {
 
             buffer.putInt((int) checksumValue);
             buffer.put(encodedType);
-            buffer.putInt(recordPayload.key().length);
-            buffer.putInt(recordPayload.value().length);
+            buffer.putInt(keyLength);
+            buffer.putInt(valueLength);
             buffer.put(recordPayload.key());
             buffer.put(recordPayload.value());
             buffer.flip();

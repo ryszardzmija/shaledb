@@ -17,7 +17,8 @@ public interface StorageEngine {
      *
      * @param key a non-empty array of bytes representing the key
      * @param value a non-null array of bytes representing the value; may be empty
-     * @throws IllegalArgumentException if the key or value is null; if the key is empty
+     * @throws IllegalArgumentException if the key or value is null, the key is empty,
+     *                                  or the combined key and value exceed the payload limit
      * @throws StorageEngineException if the key-value pair fails to be written
      */
     void put(byte[] key, byte[] value);
@@ -29,7 +30,7 @@ public interface StorageEngine {
      * leaves the store in the same state.
      *
      * @param key a non-empty array of bytes representing the key
-     * @throws IllegalArgumentException if the key is null or empty
+     * @throws IllegalArgumentException if the key is null, empty, or exceeds the payload limit
      * @throws StorageEngineException if the key-value pair associated with the key fails to be deleted
      */
     void delete(byte[] key);

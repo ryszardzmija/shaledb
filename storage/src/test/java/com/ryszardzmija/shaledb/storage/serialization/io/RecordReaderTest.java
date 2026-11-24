@@ -108,14 +108,33 @@ class RecordReaderTest {
         byte[] bytes = validRecord();
 
         assertCorruption(bytes, 0, KEY_LENGTH + VALUE_LENGTH - 1)
-                .withMessageContaining("Retrieved record length is invalid");
+                .withMessageContaining("Record payload size 5 exceeds configured maxPayloadSize 4");
     }
 
     @Test
     void rejectsOversizedPayloadWhenDeclaredLengthsSumBeyondIntegerRange() throws IOException {
         byte[] bytes = recordWithChecksum(0, Integer.MAX_VALUE, 1, new byte[0]);
 
-        assertCorruption(bytes).withMessageContaining("Retrieved record length is invalid");
+        assertCorruption(bytes).withMessageContaining("representable range");
+        assertCorruption(bytes, 0, Long.MAX_VALUE)
+                .withMessageContaining("2147483648")
+                .withMessageContaining("representable range");
+    }
+
+    @Test
+    void rejectsRepresentablePayloadLengthWithoutRoomForHeader() throws IOException {
+        byte[] bytes = recordWithChecksum(0, 1, Integer.MAX_VALUE - 13, new byte[0]);
+
+        assertCorruption(bytes, 0, Integer.MAX_VALUE)
+                .withMessageContaining("2147483635")
+                .withMessageContaining("representable range");
+    }
+
+    @Test
+    void rejectsTombstoneWithValueBytesAndValidChecksum() throws IOException {
+        byte[] bytes = recordWithChecksum(1, 1, 1, new byte[] {7, 8});
+
+        assertCorruption(bytes).withMessageContaining("Tombstone value length must be zero: 1");
     }
 
     @Test
@@ -144,21 +163,21 @@ class RecordReaderTest {
     void rejectsNegativeKeyLengthAsCorruption() throws IOException {
         byte[] bytes = recordWithChecksum(0, -1, 0, new byte[0]);
 
-        assertCorruption(bytes);
+        assertCorruption(bytes).withMessageContaining("Record key length must be positive: -1");
     }
 
     @Test
     void rejectsNegativeValueLengthWithPositiveTotalAsCorruption() throws IOException {
         byte[] bytes = recordWithChecksum(0, 2, -1, new byte[] {7});
 
-        assertCorruption(bytes);
+        assertCorruption(bytes).withMessageContaining("Record value length must not be negative: -1");
     }
 
     @Test
     void rejectsEmptyKeyWithValidChecksumAsCorruption() throws IOException {
         byte[] bytes = recordWithChecksum(0, 0, 1, new byte[] {7});
 
-        assertCorruption(bytes);
+        assertCorruption(bytes).withMessageContaining("Record key length must be positive: 0");
     }
 
     private ThrowableAssertAlternative<DataCorruptionException> assertCorruption(byte[] bytes) throws IOException {

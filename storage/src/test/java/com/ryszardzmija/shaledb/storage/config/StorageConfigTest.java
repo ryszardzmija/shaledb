@@ -73,8 +73,60 @@ class StorageConfigTest {
 
         assertThatThrownBy(() -> new StorageConfig(VALID_MAX_SEGMENT_SIZE, maxPayloadSize, tempDir, VALID_DURABILITY_MODE))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("maxPayloadSize must not exceed maxSegmentSize: maxPayloadSize=" +
-                        maxPayloadSize + ", maxSegmentSize=" + VALID_MAX_SEGMENT_SIZE);
+                .hasMessage("Encoded record size 65550 for maxPayloadSize 65537 exceeds maxSegmentSize 65536");
+    }
+
+    @Test
+    void acceptsMinimumSegmentAndPayloadSizes() {
+        StorageConfig config = new StorageConfig(14, 1, tempDir, VALID_DURABILITY_MODE);
+
+        assertThat(config.maxSegmentSize()).isEqualTo(14);
+        assertThat(config.maxPayloadSize()).isOne();
+    }
+
+    @Test
+    void rejectsSegmentTooSmallForMinimumRecord() {
+        assertThatThrownBy(() -> new StorageConfig(13, 1, tempDir, VALID_DURABILITY_MODE))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Encoded record size 14 for maxPayloadSize 1 exceeds maxSegmentSize 13");
+    }
+
+    @Test
+    void acceptsMaximumEncodedRecordSizeEqualToSegmentSize() {
+        StorageConfig config = new StorageConfig(63, 50, tempDir, VALID_DURABILITY_MODE);
+
+        assertThat(config.maxSegmentSize()).isEqualTo(63);
+        assertThat(config.maxPayloadSize()).isEqualTo(50);
+    }
+
+    @Test
+    void rejectsPayloadBudgetWhenHeaderWouldExceedSegmentSizeByOneByte() {
+        assertThatThrownBy(() -> new StorageConfig(62, 50, tempDir, VALID_DURABILITY_MODE))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Encoded record size 63 for maxPayloadSize 50 exceeds maxSegmentSize 62");
+    }
+
+    @Test
+    void acceptsLargestRepresentableEncodedRecordSize() {
+        StorageConfig config = new StorageConfig(Integer.MAX_VALUE, Integer.MAX_VALUE - 13, tempDir, VALID_DURABILITY_MODE);
+
+        assertThat(config.maxPayloadSize()).isEqualTo(2147483634L);
+    }
+
+    @Test
+    void rejectsPayloadBudgetWhenEncodedSizeExceedsIntegerRange() {
+        long maxPayloadSize = Integer.MAX_VALUE - 12L;
+
+        assertThatThrownBy(() -> new StorageConfig(Long.MAX_VALUE, maxPayloadSize, tempDir, VALID_DURABILITY_MODE))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Record payload size 2147483635 is outside the representable range");
+    }
+
+    @Test
+    void rejectsPayloadBudgetThatWouldOverflowALongWithHeader() {
+        assertThatThrownBy(() -> new StorageConfig(Long.MAX_VALUE, Long.MAX_VALUE, tempDir, VALID_DURABILITY_MODE))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Record payload size " + Long.MAX_VALUE + " is outside the representable range");
     }
 
     @Test
