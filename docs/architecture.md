@@ -1,114 +1,36 @@
 # Architecture
 
-ShaleDB implements single-key point reads, overwrites and deletes. A Java program can open a directory through `KeyValueStore`. The server exposes those operations through three unary RPCs. The unit of persistence is a record appended to a segment file. The unit of lookup is a binary key. There is no transaction grouping, range iteration, replication or persistent index in this implementation. This scope keeps both the protocol and the startup algorithm small. [Project overview](../README.md) · [StorageEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/StorageEngine.java) · [key_value_store.proto](../api/src/main/proto/shaledb/key_value_store.proto)
-
-## Components and ownership
+ShaleDB implements a Bitcask-inspired design for single-key reads, overwrites and deletes. Segment files hold the persistent history. Each open segment has an in-memory hash index derived from its records. Embedded applications call the engine directly. The gRPC server uses the same engine on behalf of remote clients. [Storage semantics](storage-semantics.md)
 
 ```mermaid
-flowchart TD
-    Client[RPC client] --> Grpc[gRPC service]
-    Proto[api / v1 messages and service] --> Grpc
-    App[server / Application] --> Grpc
-    App --> Config[StorageConfig]
-    Grpc --> Worker[Single storage worker]
-    Worker --> Facade[storage / KeyValueStore]
-    Embedded[Embedded caller] --> Facade
-    Config --> Facade
-    Facade --> Engine[StorageEngine / HashIndexEngine]
-    Engine --> Lock[DatabaseLock]
-    Engine --> Layout[Discovery, loader and rollover]
-    Engine --> Active[One mutable segment]
-    Engine --> Older[Newest-first immutable segments]
-    Layout --> Files[(Segment directory)]
-    Lock --> Files
-    Active --> ActiveIndex[Index for the active file]
-    Older --> OldIndexes[One index per older file]
-    Active --> Codec[Record reader and writer]
-    Older --> Reader[Record reader]
-    Codec --> Files
-    Reader --> Files
-    Codec --> Force[FileSystemSync]
-    Layout --> Force
+flowchart LR
+    Client[gRPC client] --> Service[Server RPC handler]
+    Service --> Worker[Single storage worker]
+    Worker --> Store[KeyValueStore]
+    Embedded[Embedded caller] --> Store
+    Store --> Engine[HashIndexEngine]
+    Engine --> Active[Active segment and index]
+    Engine --> History[Historical segments and indexes]
+    Active -->|read and append| Files[(Local segment files)]
+    History -->|read| Files
 ```
 
-| Boundary | State and responsibilities |
+| Module | Responsibility |
 | --- | --- |
-| `api` | Proto3 schema, generated Java messages, stubs and service base. The wire contract has no notion of a segment or file offset. [API build](../api/BUILD.bazel) |
-| `server` | `Application` owns configuration loading, directory preparation, store, executor and gRPC process lifecycle. Its service adapts messages, observer callbacks and exceptions to Java calls. [Application](../server/src/main/java/com/ryszardzmija/shaledb/server/Application.java) |
-| `storage` public surface | `KeyValueStore` owns a `StorageEngine`, forwards synchronous operations, logs and rethrows engine exceptions and supports try-with-resources. Its constructor always selects `HashIndexEngine`. [KeyValueStore](../storage/src/main/java/com/ryszardzmija/shaledb/storage/KeyValueStore.java) |
-| `storage.config` and `durability` | Map required settings to immutable records. `FileSystemSync` performs the file and directory force calls. The installed policy is sync on each write. [StorageConfigMapper](../storage/src/main/java/com/ryszardzmija/shaledb/storage/config/StorageConfigMapper.java) · [FileSystemSync](../storage/src/main/java/com/ryszardzmija/shaledb/storage/durability/FileSystemSync.java) |
-| `hash` and `hash.segment` | The engine owns the active segment, the newest-first history list and exclusive directory ownership. `files` selects and creates names, `loader` opens the layout, `model` owns channels and indexes, and `rollover` prepares replacements. The ownership object keeps channels that remain open after cleanup reachable. [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java) · [DatabaseLock](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/DatabaseLock.java) · [SegmentLoader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/loader/SegmentLoader.java) · [RolloverHandler](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/rollover/RolloverHandler.java) |
-| `hash.index` | An owned copy of the key plus an offset or deletion marker is retained per segment. Indexes exist only in memory and can be reconstructed from records. [HashIndex](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/HashIndex.java) · [IndexBuilder](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/IndexBuilder.java) |
-| `serialization` | `record` represents binary payloads and types. `spec` defines field widths, byte order and type codes. `io` turns records into channel writes and validates positional reads. [RecordWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordWriter.java) · [RecordReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordReader.java) |
+| `api` | Defines the `shaledb.v1.KeyValueStore` protobuf service and generates its Java messages and gRPC bindings. File layout and engine diagnostics are private to storage. [Service definition](../api/src/main/proto/shaledb/key_value_store.proto) |
+| `storage` | Exposes the closeable `KeyValueStore` façade. Its `HashIndexEngine` owns the directory lock, segments and indexes, and implements validation, persistence and recovery using local files. An embedded application can use it independently of the server. [KeyValueStore](../storage/src/main/java/com/ryszardzmija/shaledb/storage/KeyValueStore.java) · [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java) |
+| `server` | Loads configuration, opens one store and adapts unary RPCs to serialized engine calls. It owns request scheduling, response delivery and process shutdown. [Server architecture](server-architecture.md) |
 
-At build time `server_lib` depends on both `//api:api` and `//storage:storage`. Storage links to the logging stack and uses JDK file APIs. It can operate without generated messages, Jackson, Netty or a running server. The segment directory holds the durable history. The engine infers the active segment from filenames on every open. [Server build](../server/BUILD.bazel) · [Storage build](../storage/BUILD.bazel) · [Segment management](segment-management.md)
+## Read and write paths
 
-## Opening a store
+On open, the engine acquires exclusive directory ownership, discovers segments by numeric ID and rebuilds an index for each file. The highest ID is the **active segment** (mutable). All lower IDs are **historical segments** (immutable). Embedded callers must serialize operations, including close. [Concurrency and lifecycle](concurrency-and-lifecycle.md)
 
-The constructor derives the segment and durability settings and acquires exclusive ownership of the configured directory. Under that lock it discovers and validates the layout in one directory scan. The greatest numeric ID determines the active segment and seeds the factory's allocation counter. When the layout is empty, the factory creates and synchronizes the first file. The loader opens older segments newest first and the active segment last, building a fresh index for each file. The loader validates historical segments before recovering the discovered active segment and establishing its durability. The engine enters `OPEN` after installing the complete layout. Failed initialization cleans up under ownership. [Durability and recovery](durability-and-recovery.md) · [Concurrency and lifecycle](concurrency-and-lifecycle.md) · [Segment management](segment-management.md) · [Indexing](indexing.md)
+A mutation validates its input, selects a segment with room for the whole encoded record, then appends a normal record or a tombstone at EOF. After a successful file force, it publishes the new offset or deletion marker in the active index and returns. The previous records stay on disk. [Segment management](segment-management.md) · [Durability and recovery](durability-and-recovery.md)
 
-## Put and delete
+A lookup probes the active index and then the historical indexes in descending ID order. The first entry decides the result. A present entry leads to a validated read at its offset. A deletion marker masks older values. A miss across all indexes requires no record I/O. [Indexing](indexing.md)
 
-```mermaid
-sequenceDiagram
-    participant C as Caller
-    participant E as KeyValueStore / engine
-    participant W as Mutable segment / SegmentWriter
-    participant F as Append channel
-    participant I as Active index
-    C->>E: put(key, value) or delete(key)
-    E->>E: Validate arguments and compute complete encoded size
-    E->>E: Check physical size and publish a successor if needed
-    E->>W: Mutate the selected active segment
-    W->>F: Capture offset and append complete encoded record
-    W->>F: force(true)
-    alt put
-        W->>I: markPresent(key, offset)
-    else delete
-        W->>I: markDeleted(key)
-    end
-    W-->>E: Mutation published
-    E-->>C: Return on normal completion
-```
+## Design costs
 
-Both mutations append even when the logical state already matches the request. The guarded path begins with the size query and includes any rollover, then append, force and index publication. The engine can continue after deterministic ID exhaustion. An ambiguous storage or handoff failure disables normal operations before control returns to the caller. [Fail-stop policy](storage-semantics.md#fail-stop-policy) · [Durability and recovery](durability-and-recovery.md)
+Keeping indexes reconstructible avoids a second persistent structure that would have to commit atomically with each record. The costs are a scan of the entire history at startup, retained keys in each segment's index, and potentially one index probe per segment on lookup. Without compaction, obsolete values and tombstones continue to occupy disk space and historical files stay open.
 
-## Get
-
-```mermaid
-sequenceDiagram
-    participant C as Caller
-    participant E as KeyValueStore / engine
-    participant S as SegmentReader
-    participant F as Segment file
-    C->>E: get(key)
-    E->>E: Validate and copy key
-    loop Active first, then immutable segments newest first, until decisive
-        E->>S: Look up key in this segment
-        alt Key marked deleted
-            S-->>E: Deleted (stop)
-        else Index contains offset
-            S->>F: Read header and payload at offset
-            F-->>S: Record bytes
-            S->>S: Validate extent, structure, CRC32C, type and key
-            alt Validation succeeds
-                S-->>E: Present(value) (stop)
-            else Read or verification fails
-                S-->>E: Exception (stop)
-            end
-        else No local history for key
-            S-->>E: NotPresent (continue)
-        end
-    end
-    E-->>C: Optional value, empty or storage exception
-```
-
-Only an absent local entry permits the search to continue. A deletion marker terminates the search with absence. An unreadable or inconsistent indexed record terminates lookup with its original failure and sends the engine to `FAILED`. [Indexing](indexing.md) · [Fail-stop policy](storage-semantics.md#fail-stop-policy)
-
-## Design decisions and trade-offs
-
-- **Preserve the storage boundary.** A synchronous engine and a separate wire adapter allow the same implementation to serve both entry points. Serialization of RPC work is a server decision. The embedded caller must supply its own access discipline. [Concurrency and lifecycle](concurrency-and-lifecycle.md)
-- **Preserve reconstructible state.** Writing one record and rebuilding the derived index avoids having to atomically update separate data and index files. The costs are full replay at open, an index per segment and an ever-growing history. This trade-off is an architectural inference. [Indexing](indexing.md)
-- **Preserve explicit durability ordering.** The comment in `SegmentWriter.put` identifies correctness as the rationale for per-write force and acknowledges the throughput cost. This ordering gives a well-defined point to publish to readers. It leaves an uncertainty window when the storage stack reports failure. [SegmentWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentWriter.java)
-- **Scoped resource ownership.** Segment constructors open channels and replay data before returning their segment. Load and rollover own their provisional segments until returning them to the engine. The engine retains responsibility for cleanup of any segment channel still open after a close error. [Concurrency and lifecycle](concurrency-and-lifecycle.md) · [Testing](testing.md)
-- **Segment extent and rollover policy.** Lookup and replay use the actual file extent and the payload read budget. The configured segment size limits new appends. Valid historical offsets remain readable beyond that threshold. [Segment management](segment-management.md) · [Configuration](configuration.md)
+Each successful mutation pays for synchronous persistence. Operations apply to one key at a time. The engine offers no multi-key transactions, snapshots or range scans. Its recovery rule relies on a single serialized writer and immutable history. [Durability and recovery](durability-and-recovery.md)
