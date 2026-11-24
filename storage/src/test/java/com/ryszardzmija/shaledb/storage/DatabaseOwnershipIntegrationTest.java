@@ -42,6 +42,7 @@ class DatabaseOwnershipIntegrationTest {
         try (owner) {
             assertOpenFailure(config, Reason.DATABASE_LOCKED);
             owner.put(KEY, VALUE);
+            owner.put(new byte[] {4}, VALUE);
             assertThat(segmentCount(directory)).isEqualTo(2);
             assertOpenFailure(config, Reason.DATABASE_LOCKED);
             assertValue(owner, KEY, VALUE);

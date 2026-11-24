@@ -10,7 +10,7 @@ Each open engine holds exclusive ownership of its physical segment directory. Th
 | Active reference, history list, factory counter | `HashIndexEngine` and its factory mutate ordinary fields and an `ArrayList`. Switching active and publishing the old immutable takes two updates. Concurrent reads can observe an inconsistent layout. |
 | Per-segment key state | The segment reader and mutable writer share `HashIndex`. Its map and set and the two-step transitions lack synchronization. Older indexes are only read through the normal engine path after construction. |
 | File position and record contents | `RecordWriter` queries the file size, positions the write channel at that offset and transfers the record. Two writers can observe the same size, and a sequence of short writes has no engine-level mutual exclusion. The value array is read twice during encoding. |
-| Segment read channels | A read uses positional I/O, so it need not change a shared cursor. That fact alone cannot protect an index lookup or pin the channel between lookup and use. Rollover and close can close a reader's handle. |
+| Segment read channels | A read uses positional I/O, so it need not change a shared cursor. That fact alone cannot protect an index lookup or pin the channel between lookup and use. A failed rollover or close can release the channel a reader would use. |
 | Server request execution | A single worker executes queued reads, mutations and response callbacks. The worker serializes those requests. Directory ownership applies separately at the storage boundary. [Server architecture](server-architecture.md) |
 
 ## Directory identity and lock file
@@ -46,7 +46,7 @@ The protected directory is `storage.segmentDir`. Open resolves it with `Path.toR
 
 Ownership protects cooperating processes on local filesystems with reliable exclusive Java file locks. The directory and `LOCK` must stay in place while a process owns the database. Direct segment edits, separate channels to `LOCK` in an owning JVM, lock-file deletion or replacement, renaming or replacing an active directory, hard-link aliases and unusual mount aliases are outside the supported protocol. Cooperating engines in one JVM must share the registry through one class loader. Network or distributed filesystems and providers with insufficient locking semantics are unsupported. The OS releases the native lock on process termination, and the next open independently validates the segment history. [Java 25 `FileChannel`](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/nio/channels/FileChannel.html) · [Durability and recovery](durability-and-recovery.md)
 
-A reader could capture the old active segment during rollover and use its read channel after the writer closes it. Publishing the historical view and the successor takes separate updates. Coordinating concurrent access would require publishing the complete layout and pinning the channels that in-flight readers can still reach.
+Rollover transfers the active reader to the historical view. Failed handoff cleanup can close that reader. Publishing the historical view and the successor takes separate updates. Concurrent access would require publishing the complete layout and pinning channels reachable by in-flight readers.
 
 ## Architectural alternatives
 

@@ -40,9 +40,7 @@ public class SegmentFileFactory {
      * @throws SegmentFileException if there is no successor ID or creation fails
      */
     public Path createSegmentFile() {
-        if (lastId == Long.MAX_VALUE) {
-            throw new SegmentFileException.IdExhausted("Segment IDs exhausted at " + lastId + " in " + segmentDir);
-        }
+        requireSuccessorId();
         Path segmentPath = segmentDir.resolve(FileFormatInfo.filename(++lastId));
 
         FileChannel channel;
@@ -83,8 +81,11 @@ public class SegmentFileFactory {
         return segmentPath;
     }
 
-    public Path getSegmentDir() {
-        return segmentDir;
+    /** Checks ID availability without consuming an ID or changing the file set. */
+    public void requireSuccessorId() {
+        if (lastId == Long.MAX_VALUE) {
+            throw new SegmentFileException.IdExhausted("Segment IDs exhausted at " + lastId + " in " + segmentDir);
+        }
     }
 
     private void discardFailedCreation(Path segmentPath, Throwable failure) {

@@ -57,8 +57,9 @@ sequenceDiagram
     participant F as Append channel
     participant I as Active index
     C->>E: put(key, value) or delete(key)
-    E->>E: Validate arguments and copy key
-    E->>W: Mutate this segment
+    E->>E: Validate arguments and compute complete encoded size
+    E->>E: Check physical size and publish a successor if needed
+    E->>W: Mutate the selected active segment
     W->>F: Capture offset and append complete encoded record
     W->>F: force(true)
     alt put
@@ -67,11 +68,10 @@ sequenceDiagram
         W->>I: markDeleted(key)
     end
     W-->>E: Mutation published
-    E->>E: Check actual file size and attempt rollover if due
     E-->>C: Return on normal completion
 ```
 
-Both mutations append even when the logical state already matches the request. The engine guards the path from segment append through force, index publication, the size check and any rollover. Failures there disable normal operations before control returns to the caller. A size check or rollover failure occurs after the triggering record's force completed. [Fail-stop policy](storage-semantics.md#fail-stop-policy) · [Durability and recovery](durability-and-recovery.md)
+Both mutations append even when the logical state already matches the request. The guarded path begins with the size query and includes any rollover, then append, force and index publication. The engine can continue after deterministic ID exhaustion. An ambiguous storage or handoff failure disables normal operations before control returns to the caller. [Fail-stop policy](storage-semantics.md#fail-stop-policy) · [Durability and recovery](durability-and-recovery.md)
 
 ## Get
 
@@ -111,4 +111,4 @@ Only an absent local entry permits the search to continue. A deletion marker ter
 - **Preserve reconstructible state.** Writing one record and rebuilding the derived index avoids having to atomically update separate data and index files. The costs are full replay at open, an index per segment and an ever-growing history. This trade-off is an architectural inference. [Indexing](indexing.md)
 - **Preserve explicit durability ordering.** The comment in `SegmentWriter.put` identifies correctness as the rationale for per-write force and acknowledges the throughput cost. This ordering gives a well-defined point to publish to readers. It leaves an uncertainty window when the storage stack reports failure. [SegmentWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentWriter.java)
 - **Scoped resource ownership.** Segment constructors open channels and replay data before returning their segment. Load and rollover own their provisional segments until returning them to the engine. The engine retains responsibility for cleanup of any segment channel still open after a close error. [Concurrency and lifecycle](concurrency-and-lifecycle.md) · [Testing](testing.md)
-- **Segment extent and rollover policy.** Lookup and replay use the actual file extent and the payload read budget. The configured segment size triggers rollover after mutation and can change independently of which historical offsets are readable. [Segment management](segment-management.md) · [Configuration](configuration.md)
+- **Segment extent and rollover policy.** Lookup and replay use the actual file extent and the payload read budget. The configured segment size limits new appends. Valid historical offsets remain readable beyond that threshold. [Segment management](segment-management.md) · [Configuration](configuration.md)

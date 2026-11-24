@@ -1,6 +1,8 @@
 package com.ryszardzmija.shaledb.storage.hash.segment.loader;
 
 import com.ryszardzmija.shaledb.storage.durability.DurabilityConfig;
+import com.ryszardzmija.shaledb.storage.durability.DurabilityException;
+import com.ryszardzmija.shaledb.storage.durability.FileSystemSync;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.ImmutableSegment;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.MutableSegment;
 import com.ryszardzmija.shaledb.storage.hash.segment.files.SegmentLayout;
@@ -8,6 +10,7 @@ import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentChannelCleanup
 import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentConfig;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentIOException;
 
+import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,15 +20,18 @@ public class SegmentLoader {
     private final SegmentConfig segmentConfig;
     private final DurabilityConfig durabilityConfig;
     private final SegmentChannelCleanup channelCleanup;
+    private final FileSystemSync fileSystemSync;
 
     public SegmentLoader(SegmentConfig segmentConfig, DurabilityConfig durabilityConfig,
-                         SegmentChannelCleanup channelCleanup) {
+                         SegmentChannelCleanup channelCleanup, FileSystemSync fileSystemSync) {
         this.segmentConfig = Objects.requireNonNull(segmentConfig);
         this.durabilityConfig = Objects.requireNonNull(durabilityConfig);
         this.channelCleanup = Objects.requireNonNull(channelCleanup);
+        this.fileSystemSync = Objects.requireNonNull(fileSystemSync);
     }
 
-    public LoadedSegments loadSegments(SegmentLayout segmentLayout) {
+    /** @param reopening whether the active file was discovered rather than created for this open */
+    public LoadedSegments loadSegments(SegmentLayout segmentLayout, boolean reopening) {
         List<Path> immutableSegmentPaths = segmentLayout.immutableSegmentPaths();
         ArrayList<ImmutableSegment> immutableSegments = new ArrayList<>(immutableSegmentPaths.size());
         MutableSegment mutableSegment = null;
@@ -38,6 +44,11 @@ public class SegmentLoader {
 
             Path mutableSegmentPath = segmentLayout.mutableSegmentPath();
             mutableSegment = new MutableSegment(mutableSegmentPath, segmentConfig, durabilityConfig, channelCleanup);
+            if (reopening) {
+                // A discoverable file may have survived process exit before its directory force.
+                mutableSegment.sync();
+                fileSystemSync.forceDirectory(mutableSegmentPath.getParent());
+            }
 
             return new LoadedSegments(immutableSegments, mutableSegment);
         } catch (RuntimeException | Error e) {
@@ -47,7 +58,8 @@ public class SegmentLoader {
             for (ImmutableSegment segment : immutableSegments) {
                 closeAfterFailure(segment, e);
             }
-            if (e instanceof SegmentIOException) {
+            if (e instanceof SegmentIOException || e instanceof DurabilityException || e instanceof UncheckedIOException
+                    || e instanceof UnsupportedOperationException || e instanceof SecurityException) {
                 throw new SegmentLoadingException("Failed to load segments", e);
             }
             throw e;

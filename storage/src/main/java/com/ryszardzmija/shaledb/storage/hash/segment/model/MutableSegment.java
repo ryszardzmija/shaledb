@@ -24,6 +24,7 @@ public class MutableSegment implements AutoCloseable {
     private final SegmentWriter segmentWriter;
     private final RecordWriter recordWriter;
     private final SegmentChannelCleanup channelCleanup;
+    private boolean writeCloseStarted;
     private boolean closeStarted;
 
     public MutableSegment(Path path, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig) {
@@ -109,6 +110,22 @@ public class MutableSegment implements AutoCloseable {
         }
     }
 
+    /** Retires the writer and transfers the read channel and live index to a historical view. */
+    public ImmutableSegment retire() {
+        if (closeStarted || writeCloseStarted) {
+            throw new IllegalStateException("Segment writer has already been retired: " + path);
+        }
+        writeCloseStarted = true;
+        try {
+            channelCleanup.close(path, writeChannel);
+        } catch (IOException e) {
+            throw new SegmentIOException("Failed to retire the writer for segment " + path, e);
+        }
+        ImmutableSegment historical = new ImmutableSegment(path, readChannel, segmentReader, channelCleanup);
+        closeStarted = true; // The historical view now owns the reader.
+        return historical;
+    }
+
     @Override
     public void close() {
         if (closeStarted) {
@@ -116,7 +133,7 @@ public class MutableSegment implements AutoCloseable {
         }
         closeStarted = true;
         try {
-            channelCleanup.close(path, readChannel, writeChannel);
+            channelCleanup.close(path, readChannel, writeCloseStarted ? null : writeChannel);
         } catch (IOException e) {
             throw new SegmentIOException("Failed to close segment " + path, e);
         }

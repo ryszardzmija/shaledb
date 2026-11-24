@@ -19,6 +19,7 @@ import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -27,6 +28,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Set;
 
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertFailed;
@@ -34,6 +36,8 @@ import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertFa
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertValue;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.hex;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.mockChannels;
+import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.segmentCount;
+import static java.nio.file.StandardOpenOption.CREATE_NEW;
 import static java.nio.file.StandardOpenOption.READ;
 import static java.nio.file.StandardOpenOption.WRITE;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -315,12 +319,12 @@ class KeyValueStoreFailStopTest {
     }
 
     @Test
-    void successorFileForceFailureIsTerminalAfterTheTriggeringMutationWasForced() throws IOException {
+    void successorFileForceFailureIsTerminalBeforeTheIncomingAppend() throws IOException {
         assertSuccessorForceFailure(false);
     }
 
     @Test
-    void successorDirectoryForceFailureIsTerminalAfterTheTriggeringMutationWasForced() throws IOException {
+    void successorDirectoryForceFailureIsTerminalBeforeTheIncomingAppend() throws IOException {
         assertSuccessorForceFailure(true);
     }
 
@@ -330,7 +334,6 @@ class KeyValueStoreFailStopTest {
         StorageConfig config = new StorageConfig(32, 19, directory, DurabilityMode.SYNC_EACH_WRITE);
         IOException cause = new IOException("successor force reported failure");
         var injected = new DurabilityException("successor publication failed", cause);
-        byte[] expected = historyWith(OVERWRITE, OVERWRITE.length);
         try (var syncs = mockConstruction(FileSystemSync.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
              KeyValueStore store = new KeyValueStore(config)) {
             store.put(KEY, VALUE);
@@ -342,16 +345,16 @@ class KeyValueStoreFailStopTest {
             }
 
             StorageEngineException failure = assertFailure(() -> store.put(KEY, REPLACEMENT), Operation.PUT,
-                    Reason.DURABILITY, MutationOutcome.FORCE_COMPLETED);
+                    Reason.DURABILITY, MutationOutcome.NOT_APPENDED);
             assertThat(failure).hasRootCause(cause);
             assertFailed(store, failure, KEY);
             assertThat(segment(3)).doesNotExist();
-            assertThat(Files.readAllBytes(triggeringSegment)).containsExactly(expected);
+            assertThat(Files.readAllBytes(triggeringSegment)).containsExactly(FIRST_RECORD);
             assertThat(Files.readAllBytes(segment(1))).containsExactly(FIRST_RECORD);
             assertLocked();
         }
         try (KeyValueStore reopened = new KeyValueStore(config)) {
-            assertValue(reopened, KEY, REPLACEMENT);
+            assertValue(reopened, KEY, VALUE);
         }
     }
 
@@ -373,7 +376,8 @@ class KeyValueStoreFailStopTest {
             when(result.newImmutableSegment()).thenReturn((ImmutableSegment) context.arguments().get(1));
         }); KeyValueStore store = new KeyValueStore(config)) {
             assertThat(loaded.constructed()).hasSize(1);
-            assertThatThrownBy(() -> store.put(KEY, VALUE)).isSameAs(failure);
+            store.put(KEY, VALUE);
+            assertThatThrownBy(() -> store.delete(KEY)).isSameAs(failure);
             var handoff = handoffs.constructed().getFirst();
             assertThatThrownBy(handoff.newImmutableSegment()::size).hasRootCauseInstanceOf(ClosedChannelException.class);
             assertThat(handoff.newMutableSegment().size()).isZero();
@@ -387,6 +391,161 @@ class KeyValueStoreFailStopTest {
         }
         try (KeyValueStore reopened = new KeyValueStore(config)) {
             assertValue(reopened, KEY, VALUE);
+        }
+    }
+
+    @Test
+    void rolloverRetiresTheWriterAndPublishesTheSuccessorBeforeAppendingAndIndexing() throws IOException {
+        assertRolloverAndTombstonePublication(false);
+    }
+
+    @Test
+    void forcedButUnacknowledgedTombstoneInTheSuccessorShadowsHistoryOnReopen() throws IOException {
+        assertRolloverAndTombstonePublication(true);
+    }
+
+    private void assertRolloverAndTombstonePublication(boolean interruptPublication) throws IOException {
+        var config = new StorageConfig(FIRST_RECORD.length, 4, directory, DurabilityMode.SYNC_EACH_WRITE);
+        var oldIndex = new HashIndex();
+        var newIndex = new HashIndex();
+        var key = new ByteKey(KEY);
+        var injected = new IllegalStateException("successor index publication failed");
+        Path successor = segment(2);
+        try (var syncs = mockConstruction(FileSystemSync.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
+             var indexes = mockConstruction(HashIndex.class,
+                     context -> withSettings().defaultAnswer(delegatesTo(context.getCount() == 1 ? oldIndex : newIndex)),
+                     (index, context) -> {
+                         if (context.getCount() == 2 && interruptPublication) {
+                             doThrow(injected).when(index).markDeleted(key);
+                         }
+                     });
+             KeyValueStore store = new KeyValueStore(config)) {
+            store.put(KEY, VALUE);
+            FileSystemSync publisher = syncs.constructed().getFirst();
+            FileSystemSync oldSync = syncs.constructed().get(1);
+            var oldWriter = ArgumentCaptor.forClass(FileChannel.class);
+            verify(oldSync, times(2)).forceFile(oldWriter.capture());
+            clearInvocations(publisher, oldSync);
+            doAnswer(call -> {
+                assertThat(oldWriter.getValue().isOpen()).isFalse();
+                assertThat(successor).isEmptyFile();
+                return call.callRealMethod();
+            }).when(publisher).forceFile(any(FileChannel.class));
+            doAnswer(call -> {
+                assertThat(successor).isEmptyFile();
+                return call.callRealMethod();
+            }).when(publisher).forceDirectory(directory);
+
+            if (interruptPublication) {
+                assertThatThrownBy(() -> store.delete(KEY)).isSameAs(injected);
+                assertFailed(store, injected, KEY);
+                assertLocked();
+                assertThat(newIndex.isDeleted(key)).isFalse();
+            } else {
+                store.delete(KEY);
+                assertThat(store.get(KEY)).isEmpty();
+                assertThat(newIndex.isDeleted(key)).isTrue();
+            }
+
+            assertThat(indexes.constructed()).hasSize(2); // Retirement reused the live index.
+            FileSystemSync successorSync = syncs.constructed().get(2);
+            HashIndex successorIndex = indexes.constructed().get(1);
+            var ordered = inOrder(publisher, successorSync, successorIndex);
+            ordered.verify(publisher).forceFile(any(FileChannel.class));
+            ordered.verify(publisher).forceDirectory(directory);
+            ordered.verify(successorSync).forceFile(any(FileChannel.class));
+            ordered.verify(successorIndex).markDeleted(key);
+            verifyNoInteractions(oldSync);
+            assertThat(Files.readAllBytes(active)).containsExactly(FIRST_RECORD);
+            assertThat(Files.readAllBytes(successor)).containsExactly(TOMBSTONE);
+        }
+        try (KeyValueStore reopened = new KeyValueStore(config)) {
+            assertThat(reopened.get(KEY)).isEmpty();
+        }
+    }
+
+    @Test
+    void partialAppendAfterRolloverLeavesTheTailOnlyInTheHighestSegment() throws IOException {
+        var config = new StorageConfig(OVERWRITE.length, 5, directory, DurabilityMode.SYNC_EACH_WRITE);
+        Path successor = segment(2);
+        IOException injected = new IOException("interrupted successor append");
+        byte[] prefix = Arrays.copyOf(OVERWRITE, 3);
+        var openedWriters = new ArrayList<FileChannel>();
+        try (KeyValueStore store = new KeyValueStore(config)) {
+            store.put(KEY, VALUE);
+            try (var channels = mockChannels(directory)) {
+                channels.when(() -> FileChannel.open(successor, WRITE, CREATE_NEW)).thenAnswer(call ->
+                        successor.getFileSystem().provider().newFileChannel(successor, Set.of(WRITE, CREATE_NEW)));
+                channels.when(() -> FileChannel.open(successor, READ)).thenAnswer(call ->
+                        successor.getFileSystem().provider().newFileChannel(successor, Set.of(READ)));
+                channels.when(() -> FileChannel.open(successor, WRITE)).thenAnswer(call -> {
+                    FileChannel file = successor.getFileSystem().provider().newFileChannel(successor, Set.of(WRITE));
+                    openedWriters.add(file);
+                    FileChannel writer = mock(FileChannel.class, delegatesTo(file));
+                    doAnswer(write -> {
+                        ByteBuffer buffer = write.getArgument(0);
+                        ByteBuffer partial = buffer.slice(0, prefix.length);
+                        while (partial.hasRemaining()) {
+                            assertThat(file.write(partial)).isPositive();
+                        }
+                        buffer.position(buffer.position() + prefix.length);
+                        return prefix.length;
+                    }).doThrow(injected).when(writer).write(any(ByteBuffer.class));
+                    return writer;
+                });
+
+                StorageEngineException failure = assertFailure(() -> store.put(KEY, REPLACEMENT), Operation.PUT,
+                        Reason.STORAGE_IO, MutationOutcome.UNKNOWN);
+                assertThat(failure).hasRootCause(injected);
+                assertFailed(store, failure, KEY);
+                assertLocked();
+                assertThat(segmentCount(directory)).isEqualTo(2);
+                assertThat(Files.readAllBytes(active)).containsExactly(FIRST_RECORD);
+                assertThat(Files.readAllBytes(successor)).containsExactly(prefix);
+            }
+        }
+        assertThat(openedWriters).hasSize(1).allMatch(channel -> !channel.isOpen());
+        assertThat(Files.readAllBytes(active)).containsExactly(FIRST_RECORD);
+        assertThat(Files.readAllBytes(successor)).containsExactly(prefix);
+        try (FileChannel lockChannel = FileChannel.open(directory.resolve("LOCK"), WRITE);
+             var lock = lockChannel.tryLock()) {
+            assertThat(lock).isNotNull();
+        }
+        assertFailure(this::openAndClose, Operation.OPEN, Reason.INCOMPLETE_RECORD, MutationOutcome.NOT_APPLICABLE);
+    }
+
+    @Test
+    void reopenForcesAnEmptySuccessorAndDirectoryBeforeItAcceptsItsFirstWrite() throws IOException {
+        var config = new StorageConfig(32, 4, directory, DurabilityMode.SYNC_EACH_WRITE);
+        try (KeyValueStore store = new KeyValueStore(config)) {
+            store.put(KEY, VALUE);
+            store.put(MISSING, VALUE);
+            store.delete(KEY);
+        }
+        Path emptySuccessor = Files.createFile(segment(3));
+        byte[] oldestBytes = Files.readAllBytes(active);
+        byte[] tombstoneBytes = Files.readAllBytes(segment(2));
+        try (var syncs = mockConstruction(FileSystemSync.class, withSettings().defaultAnswer(CALLS_REAL_METHODS));
+             KeyValueStore store = new KeyValueStore(config)) {
+            FileSystemSync publisher = syncs.constructed().getFirst();
+            FileSystemSync activeSync = syncs.constructed().get(1);
+            var ordered = inOrder(activeSync, publisher);
+            ordered.verify(activeSync).forceFile(any(FileChannel.class));
+            ordered.verify(publisher).forceDirectory(directory);
+            assertThat(emptySuccessor).isEmptyFile();
+            assertValue(store, MISSING, VALUE);
+            assertThat(store.get(KEY)).isEmpty();
+
+            store.put(KEY, VALUE);
+            ordered.verify(activeSync).forceFile(any(FileChannel.class));
+            assertThat(Files.readAllBytes(emptySuccessor)).containsExactly(FIRST_RECORD);
+            assertThat(segmentCount(directory)).isEqualTo(3);
+            assertThat(Files.readAllBytes(active)).containsExactly(oldestBytes);
+            assertThat(Files.readAllBytes(segment(2))).containsExactly(tombstoneBytes);
+        }
+        try (KeyValueStore reopened = new KeyValueStore(config)) {
+            assertValue(reopened, KEY, VALUE);
+            assertValue(reopened, MISSING, VALUE);
         }
     }
 

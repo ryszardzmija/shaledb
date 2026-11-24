@@ -19,6 +19,7 @@ import java.util.regex.Pattern;
 
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 import static java.nio.file.StandardOpenOption.CREATE;
+import static java.nio.file.StandardOpenOption.READ;
 import static java.nio.file.StandardOpenOption.WRITE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
@@ -71,11 +72,17 @@ final class KeyValueStoreTestSupport {
     }
 
     static MockedStatic<FileChannel> mockChannels(Path directory) {
+        return mockChannels(directory, null);
+    }
+
+    static MockedStatic<FileChannel> mockChannels(Path directory, FileChannel directoryChannel) {
         Path lockPath = directory.resolve("LOCK");
         MockedStatic<FileChannel> channels = mockStatic(FileChannel.class);
         channels.when(() -> FileChannel.open(lockPath, WRITE, CREATE, NOFOLLOW_LINKS))
                 .thenAnswer(call -> lockPath.getFileSystem().provider().newFileChannel(lockPath,
                         Set.of(WRITE, CREATE, NOFOLLOW_LINKS)));
+        channels.when(() -> FileChannel.open(directory, READ)).thenAnswer(call -> directoryChannel != null
+                ? directoryChannel : directory.getFileSystem().provider().newFileChannel(directory, Set.of(READ)));
         return channels;
     }
 
