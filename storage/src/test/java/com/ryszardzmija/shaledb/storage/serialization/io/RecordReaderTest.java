@@ -166,8 +166,16 @@ class RecordReaderTest {
         Path path = Files.write(tempDir.resolve("record.data"), bytes);
         try (FileChannel channel = FileChannel.open(path, READ)) {
             RecordReader reader = new RecordReader(channel, readLimit);
-            ReadLimitExceeded failure = catchThrowableOfType(() -> reader.read(new ReadRequest(0)), ReadLimitExceeded.class);
-            assertReadLimit(failure, Limit.IMPLEMENTATION, declaredPayloadSize, Integer.MAX_VALUE - HEADER_SIZE);
+            DataCorruptionException failure = catchThrowableOfType(
+                    () -> reader.read(new ReadRequest(0)), DataCorruptionException.class);
+            assertThat(failure).isNotNull();
+            assertThat(failure.recordOffset()).isZero();
+            assertThat(failure.kind()).isEqualTo(DataCorruptionException.Kind.STRUCTURE);
+            assertThat(failure.getCause()).isInstanceOfSatisfying(PayloadLimitExceededException.class, limit -> {
+                assertThat(limit.limit()).isEqualTo(Limit.IMPLEMENTATION);
+                assertThat(limit.payloadSize()).isEqualTo(declaredPayloadSize);
+                assertThat(limit.maxPayloadSize()).isEqualTo(Integer.MAX_VALUE - HEADER_SIZE);
+            });
         }
         assertThat(Files.readAllBytes(path)).containsExactly(bytes);
     }

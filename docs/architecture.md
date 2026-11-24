@@ -45,7 +45,7 @@ At build time `server_lib` depends on both `//api:api` and `//storage:storage`. 
 
 ## Opening a store
 
-The constructor derives the segment and durability settings and acquires exclusive ownership of the configured directory. Under that lock it discovers and validates the layout in one directory scan. The greatest numeric ID determines the active segment and seeds the factory's allocation counter. When the layout is empty, the factory creates and synchronizes the first file. The loader opens older segments newest first and the active segment last, building a fresh index for each file. The engine enters `OPEN` after installing the complete layout. Failed initialization cleans up under ownership. [Concurrency and lifecycle](concurrency-and-lifecycle.md) · [Segment management](segment-management.md) · [Indexing](indexing.md)
+The constructor derives the segment and durability settings and acquires exclusive ownership of the configured directory. Under that lock it discovers and validates the layout in one directory scan. The greatest numeric ID determines the active segment and seeds the factory's allocation counter. When the layout is empty, the factory creates and synchronizes the first file. The loader opens older segments newest first and the active segment last, building a fresh index for each file. The loader validates historical segments before recovering the discovered active segment and establishing its durability. The engine enters `OPEN` after installing the complete layout. Failed initialization cleans up under ownership. [Durability and recovery](durability-and-recovery.md) · [Concurrency and lifecycle](concurrency-and-lifecycle.md) · [Segment management](segment-management.md) · [Indexing](indexing.md)
 
 ## Put and delete
 

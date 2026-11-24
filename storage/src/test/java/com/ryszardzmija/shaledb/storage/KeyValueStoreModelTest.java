@@ -5,8 +5,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
@@ -14,10 +17,14 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Random;
 import java.util.TreeMap;
+import java.util.zip.CRC32C;
 
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.config;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.hex;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.segmentCount;
+import static java.nio.file.StandardOpenOption.APPEND;
+import static java.nio.file.StandardOpenOption.CREATE_NEW;
+import static java.nio.file.StandardOpenOption.WRITE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class KeyValueStoreModelTest {
@@ -98,7 +105,57 @@ class KeyValueStoreModelTest {
             }
 
             assertThat(segmentCount(tempDir)).as("segment files after seed 0x%x", seed).isGreaterThanOrEqualTo(3);
+            recoverUnacknowledgedRecords(database, expected, random, seed);
         }
+    }
+
+    private void recoverUnacknowledgedRecords(ReopenableStore database, Map<String, byte[]> expected,
+                                               Random random, long seed) throws IOException {
+        String overwritten = KEYS.get(0);
+        String deleted = KEYS.get(1);
+        database.store.put(hex(overwritten), new byte[] {1});
+        database.store.put(hex(deleted), new byte[] {2});
+        database.close();
+        NavigableMap<Path, byte[]> history = segmentBytes();
+        String previousName = history.lastKey().getFileName().toString();
+        long nextId = Long.parseLong(previousName.substring("segment_".length(), previousName.length() - ".log".length())) + 1;
+        Path successor = tempDir.resolve("segment_%019d.log".formatted(nextId));
+
+        byte[] unacknowledged = randomValue(random);
+        byte[] overwrite = encode(0, overwritten, unacknowledged);
+        byte[] tombstone = encode(1, deleted, new byte[0]);
+        byte[] incompleteReinsertion = encode(0, deleted, randomValue(random));
+        byte[] retained = ByteBuffer.allocate(overwrite.length + tombstone.length).put(overwrite).put(tombstone).array();
+        Files.write(successor, retained, CREATE_NEW, WRITE);
+        Files.write(successor, Arrays.copyOf(incompleteReinsertion, incompleteReinsertion.length - 1), APPEND);
+        expected.put(overwritten, unacknowledged);
+        expected.remove(deleted);
+
+        database.reopen();
+        String context = "seed 0x%x after recovering unacknowledged records".formatted(seed);
+        for (String key : KEYS) {
+            assertMatches(database.store, key, expected.get(key), context);
+        }
+        assertThat(Files.readAllBytes(successor)).as(context).containsExactly(retained);
+        byte[] reinsertion = {0, (byte) 0xff};
+        database.store.put(hex(deleted), reinsertion);
+        expected.put(deleted, reinsertion);
+        database.reopen();
+        for (String key : KEYS) {
+            assertMatches(database.store, key, expected.get(key), context + " and reopening after reinsertion");
+        }
+        for (var segment : history.entrySet()) {
+            assertThat(Files.readAllBytes(segment.getKey())).as(context).containsExactly(segment.getValue());
+        }
+    }
+
+    private static byte[] encode(int type, String keyHex, byte[] value) {
+        byte[] key = hex(keyHex);
+        ByteBuffer bytes = ByteBuffer.allocate(13 + key.length + value.length).order(ByteOrder.LITTLE_ENDIAN);
+        bytes.putInt(0).put((byte) type).putInt(key.length).putInt(value.length).put(key).put(value);
+        var checksum = new CRC32C();
+        checksum.update(bytes.array(), 4, bytes.capacity() - 4);
+        return bytes.putInt(0, (int) checksum.getValue()).array();
     }
 
     private NavigableMap<Path, byte[]> segmentBytes() throws IOException {

@@ -76,15 +76,23 @@ class KeyValueStoreFailureTest {
     }
 
     @Test
-    void startupReportsIncompleteHeaderAndPayloadWithTheirExtents() throws IOException {
+    void startupReportsIncompleteHistoricalHeaderAndPayloadWithTheirExtents() throws IOException {
         createRecord();
         byte[] complete = Files.readAllBytes(segment(1));
+        byte[] activeTail = Arrays.copyOf(complete, 3);
+        Files.write(segment(2), activeTail);
 
-        Files.write(segment(1), Arrays.copyOf(complete, HEADER_SIZE - 1));
+        byte[] shortHeader = Arrays.copyOf(complete, HEADER_SIZE - 1);
+        Files.write(segment(1), shortHeader);
         assertIncomplete(openFailure(config(128, 256), Reason.INCOMPLETE_RECORD), Section.HEADER, HEADER_SIZE, HEADER_SIZE - 1);
+        assertThat(Files.readAllBytes(segment(1))).containsExactly(shortHeader);
+        assertThat(Files.readAllBytes(segment(2))).containsExactly(activeTail);
 
-        Files.write(segment(1), Arrays.copyOf(complete, complete.length - 1));
+        byte[] shortPayload = Arrays.copyOf(complete, complete.length - 1);
+        Files.write(segment(1), shortPayload);
         assertIncomplete(openFailure(config(128, 256), Reason.INCOMPLETE_RECORD), Section.PAYLOAD, 3, 2);
+        assertThat(Files.readAllBytes(segment(1))).containsExactly(shortPayload);
+        assertThat(Files.readAllBytes(segment(2))).containsExactly(activeTail);
     }
 
     @Test
@@ -92,6 +100,7 @@ class KeyValueStoreFailureTest {
         assertThatIllegalArgumentException().isThrownBy(() -> config(0, 256));
         assertThat(segmentCount(directory)).isZero();
         createRecord();
+        Files.createFile(segment(2));
 
         StorageEngineException failure = openFailure(config(2, 256), Reason.INCOMPATIBLE_RECORD_SIZE);
 

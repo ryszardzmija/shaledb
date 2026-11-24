@@ -247,10 +247,10 @@ public class HashIndexEngine implements StorageEngine {
 
     private static StorageEngineException failure(
             Operation operation, MutationOutcome outcome, String message, RuntimeException cause) {
-        return new StorageEngineException(message, cause, operation, classify(cause), outcome);
+        return new StorageEngineException(message, cause, operation, classify(operation, cause), outcome);
     }
 
-    private static Reason classify(RuntimeException failure) {
+    private static Reason classify(Operation operation, RuntimeException failure) {
         // Only the primary cause determines the category. Suppressed failures describe cleanup.
         for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
             switch (cause) {
@@ -259,7 +259,10 @@ public class HashIndexEngine implements StorageEngine {
                     return corruption.kind() == DataCorruptionException.Kind.CHECKSUM
                             ? Reason.CHECKSUM_CORRUPTION : Reason.STRUCTURAL_CORRUPTION;
                 }
-                case IncompleteRecordException _ -> { return Reason.INCOMPLETE_RECORD; }
+                case IncompleteRecordException incomplete -> {
+                    return operation == Operation.OPEN && incomplete.origin() == IncompleteRecordException.Origin.TRANSFER_EOF
+                            ? Reason.STORAGE_IO : Reason.INCOMPLETE_RECORD;
+                }
                 case RecordIOException.ReadLimitExceeded _ -> { return Reason.INCOMPATIBLE_RECORD_SIZE; }
                 case RecordIOException.InvalidLocation _, ReadRequest.BeyondEnd _ -> {
                     return Reason.INVALID_RECORD_LOCATION;

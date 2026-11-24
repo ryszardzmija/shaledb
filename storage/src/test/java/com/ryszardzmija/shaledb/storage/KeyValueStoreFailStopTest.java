@@ -90,19 +90,19 @@ class KeyValueStoreFailStopTest {
     @Test
     void partialHeaderAppendLeavesAnExactUnmodifiedSuffixAfterClose() throws IOException {
         assertAppendFailure(Operation.PUT, OVERWRITE, 3);
-        assertFailure(this::openAndClose, Operation.OPEN, Reason.INCOMPLETE_RECORD, MutationOutcome.NOT_APPLICABLE);
+        assertActiveRecoveryKeepsOriginalValue();
     }
 
     @Test
     void partialPayloadAppendLeavesAnExactUnmodifiedSuffixAfterClose() throws IOException {
         assertAppendFailure(Operation.PUT, OVERWRITE, FormatInfo.getHeaderSize() + 1);
-        assertFailure(this::openAndClose, Operation.OPEN, Reason.INCOMPLETE_RECORD, MutationOutcome.NOT_APPLICABLE);
+        assertActiveRecoveryKeepsOriginalValue();
     }
 
     @Test
     void partialTombstoneAppendLeavesAnExactUnmodifiedSuffixAfterClose() throws IOException {
         assertAppendFailure(Operation.DELETE, TOMBSTONE, FormatInfo.getHeaderSize() + 1);
-        assertFailure(this::openAndClose, Operation.OPEN, Reason.INCOMPLETE_RECORD, MutationOutcome.NOT_APPLICABLE);
+        assertActiveRecoveryKeepsOriginalValue();
     }
 
     private void assertAppendFailure(Operation operation, byte[] record, int prefixLength) throws IOException {
@@ -511,7 +511,11 @@ class KeyValueStoreFailStopTest {
              var lock = lockChannel.tryLock()) {
             assertThat(lock).isNotNull();
         }
-        assertFailure(this::openAndClose, Operation.OPEN, Reason.INCOMPLETE_RECORD, MutationOutcome.NOT_APPLICABLE);
+        try (KeyValueStore reopened = new KeyValueStore(config)) {
+            assertValue(reopened, KEY, VALUE);
+            assertThat(successor).isEmptyFile();
+            assertThat(Files.readAllBytes(active)).containsExactly(FIRST_RECORD);
+        }
     }
 
     @Test
@@ -571,6 +575,13 @@ class KeyValueStoreFailStopTest {
                     .thenAnswer(call -> active.getFileSystem().provider().newFileChannel(active, Set.of(READ)));
             channels.when(() -> FileChannel.open(active, WRITE)).thenReturn(writer);
             return open();
+        }
+    }
+
+    private void assertActiveRecoveryKeepsOriginalValue() throws IOException {
+        try (KeyValueStore reopened = open()) {
+            assertValue(reopened, KEY, VALUE);
+            assertThat(Files.readAllBytes(active)).containsExactly(FIRST_RECORD);
         }
     }
 
