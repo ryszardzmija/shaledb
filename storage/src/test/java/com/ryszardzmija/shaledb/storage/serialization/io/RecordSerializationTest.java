@@ -1,6 +1,12 @@
 package com.ryszardzmija.shaledb.storage.serialization.io;
 
+import com.ryszardzmija.shaledb.storage.durability.DurabilityConfig;
+import com.ryszardzmija.shaledb.storage.durability.DurabilityMode;
 import com.ryszardzmija.shaledb.storage.durability.FileSystemSync;
+import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
+import com.ryszardzmija.shaledb.storage.hash.segment.model.LookupResult;
+import com.ryszardzmija.shaledb.storage.hash.segment.model.MutableSegment;
+import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentConfig;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordPayload;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
 import org.junit.jupiter.api.Test;
@@ -12,9 +18,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HexFormat;
 
-import static java.nio.file.StandardOpenOption.APPEND;
 import static java.nio.file.StandardOpenOption.CREATE_NEW;
 import static java.nio.file.StandardOpenOption.READ;
+import static java.nio.file.StandardOpenOption.WRITE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class RecordSerializationTest {
@@ -119,27 +125,84 @@ class RecordSerializationTest {
         RecordPayload secondPayload = new RecordPayload(secondKey, emptyValue);
         RecordPayload tombstone = RecordPayload.forTombstone(firstKey);
         Path path = tempDir.resolve("consecutive.data");
+        WriteResult first;
+        WriteResult second;
+        WriteResult third;
 
-        try (FileChannel channel = FileChannel.open(path, CREATE_NEW, APPEND)) {
+        try (FileChannel channel = FileChannel.open(path, CREATE_NEW, WRITE)) {
             RecordWriter writer = new RecordWriter(channel, new FileSystemSync(), MAX_PAYLOAD_SIZE);
 
-            WriteResult first = writer.write(new WriteRequest(firstPayload, RecordType.NORMAL));
-            WriteResult second = writer.write(new WriteRequest(secondPayload, RecordType.NORMAL));
-            WriteResult third = writer.write(new WriteRequest(tombstone, RecordType.TOMBSTONE));
+            first = writer.write(new WriteRequest(firstPayload, RecordType.NORMAL));
+            second = writer.write(new WriteRequest(secondPayload, RecordType.NORMAL));
+            third = writer.write(new WriteRequest(tombstone, RecordType.TOMBSTONE));
 
             assertThat(first.writeOffset()).isZero();
+            assertThat(first.encodedRecordSize()).isEqualTo(17);
             assertThat(second.writeOffset()).isEqualTo(17);
+            assertThat(second.encodedRecordSize()).isEqualTo(15);
             assertThat(third.writeOffset()).isEqualTo(32);
+            assertThat(third.encodedRecordSize()).isEqualTo(14);
         }
 
+        assertThat(Files.readAllBytes(path)).containsExactly(hex(
+                "e1ff8b2600010000000300000001101112" +
+                "59f4840d0002000000000000000203" +
+                "85dede2e01010000000000000001"));
         try (FileChannel channel = FileChannel.open(path, READ)) {
             RecordReader reader = new RecordReader(channel, MAX_PAYLOAD_SIZE);
 
-            assertRecord(reader.read(new ReadRequest(32)), RecordType.TOMBSTONE, firstKey, emptyValue, 46);
-            assertRecord(reader.read(new ReadRequest(0)), RecordType.NORMAL, firstKey, firstValue, 17);
-            assertRecord(reader.read(new ReadRequest(17)), RecordType.NORMAL, secondKey, emptyValue, 32);
+            assertRecord(reader.read(new ReadRequest(third.writeOffset())), RecordType.TOMBSTONE, firstKey, emptyValue, 46);
+            assertRecord(reader.read(new ReadRequest(first.writeOffset())), RecordType.NORMAL, firstKey, firstValue, 17);
+            assertRecord(reader.read(new ReadRequest(second.writeOffset())), RecordType.NORMAL, secondKey, emptyValue, 32);
             assertThat(channel.size()).isEqualTo(46);
         }
+    }
+
+    @Test
+    void reopensWithWriteAccessAndAppendsAtTheHistoricalBoundary() throws IOException {
+        Path path = writeRecord(new RecordPayload(hex("0080ff"), hex("c328")), RecordType.NORMAL);
+        assertThat(Files.readAllBytes(path)).containsExactly(hex(NORMAL_RECORD_HEX));
+
+        WriteResult appended;
+        try (FileChannel channel = FileChannel.open(path, WRITE)) {
+            RecordWriter writer = new RecordWriter(channel, new FileSystemSync(), MAX_PAYLOAD_SIZE);
+            appended = writer.write(new WriteRequest(RecordPayload.forTombstone(hex("dead")), RecordType.TOMBSTONE));
+
+            assertThat(appended.writeOffset()).isEqualTo(18);
+            assertThat(appended.encodedRecordSize()).isEqualTo(15);
+        }
+
+        assertThat(Files.readAllBytes(path)).containsExactly(hex(NORMAL_RECORD_HEX + TOMBSTONE_RECORD_HEX));
+        try (FileChannel channel = FileChannel.open(path, READ)) {
+            RecordReader reader = new RecordReader(channel, MAX_PAYLOAD_SIZE);
+
+            assertRecord(reader.read(new ReadRequest(0)), RecordType.NORMAL, hex("0080ff"), hex("c328"), 18);
+            assertRecord(reader.read(new ReadRequest(appended.writeOffset())),
+                    RecordType.TOMBSTONE, hex("dead"), new byte[0], 33);
+        }
+    }
+
+    @Test
+    void reopenedMutableSegmentAppendsAndIndexesNewRecordsWithoutOverwritingHistory() throws IOException {
+        Path path = Files.createFile(tempDir.resolve("segment.data"));
+        SegmentConfig config = new SegmentConfig(4096, MAX_PAYLOAD_SIZE);
+        DurabilityConfig durability = new DurabilityConfig(DurabilityMode.SYNC_EACH_WRITE);
+        ByteKey historicalKey = new ByteKey(hex("dead"));
+        ByteKey newKey = new ByteKey(hex("0080ff"));
+
+        try (MutableSegment segment = new MutableSegment(path, config, durability)) {
+            segment.delete(historicalKey);
+        }
+        assertThat(Files.readAllBytes(path)).containsExactly(hex(TOMBSTONE_RECORD_HEX));
+
+        try (MutableSegment segment = new MutableSegment(path, config, durability)) {
+            segment.put(newKey, hex("c328"));
+
+            assertThat(segment.get(newKey)).isInstanceOfSatisfying(LookupResult.Present.class,
+                    result -> assertThat(result.value()).containsExactly(hex("c328")));
+            assertThat(segment.get(historicalKey)).isInstanceOf(LookupResult.Deleted.class);
+        }
+        assertThat(Files.readAllBytes(path)).containsExactly(hex(TOMBSTONE_RECORD_HEX + NORMAL_RECORD_HEX));
     }
 
     private Path writeRecord(RecordPayload payload, RecordType type) throws IOException {
@@ -148,7 +211,7 @@ class RecordSerializationTest {
 
     private Path writeRecord(RecordPayload payload, RecordType type, long maxPayloadSize) throws IOException {
         Path path = tempDir.resolve("record.data");
-        try (FileChannel channel = FileChannel.open(path, CREATE_NEW, APPEND)) {
+        try (FileChannel channel = FileChannel.open(path, CREATE_NEW, WRITE)) {
             new RecordWriter(channel, new FileSystemSync(), maxPayloadSize).write(new WriteRequest(payload, type));
         }
         return path;

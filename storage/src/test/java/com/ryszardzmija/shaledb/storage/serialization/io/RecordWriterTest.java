@@ -12,8 +12,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.function.Supplier;
 
-import static java.nio.file.StandardOpenOption.APPEND;
 import static java.nio.file.StandardOpenOption.CREATE_NEW;
+import static java.nio.file.StandardOpenOption.WRITE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
@@ -67,7 +67,7 @@ class RecordWriterTest {
 
     private void assertRejectedWithoutAppend(Supplier<WriteRequest> request, String expectedMessage) throws IOException {
         Path path = tempDir.resolve("record.data");
-        try (FileChannel channel = FileChannel.open(path, CREATE_NEW, APPEND)) {
+        try (FileChannel channel = FileChannel.open(path, CREATE_NEW, WRITE)) {
             RecordWriter writer = new RecordWriter(channel, new FileSystemSync(), MAX_PAYLOAD_SIZE);
             writer.write(new WriteRequest(new RecordPayload(new byte[] {1}, new byte[] {2}), RecordType.NORMAL));
             byte[] before = Files.readAllBytes(path);

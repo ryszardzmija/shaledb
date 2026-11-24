@@ -23,7 +23,7 @@ The index API exposes separate `isDeleted` and `getKeyOffset` calls. An empty of
 
 ## Live maintenance and replay
 
-In a live segment, put publishes the writer's captured offset only after successful append and force. Delete publishes a marker at that same stage and discards its write offset. On rebuild, `IndexBuilder` always starts at zero and uses the following loop. There is no saved index, checkpoint or persisted list of keys. [SegmentWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentWriter.java) · [IndexBuilder](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/IndexBuilder.java)
+In a live segment, put publishes the writer's append start only after successful append and force. Delete publishes a marker at that same stage and discards its write result. On rebuild, `IndexBuilder` always starts at zero and uses the following loop. There is no saved index, checkpoint or persisted list of keys. [SegmentWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentWriter.java) · [IndexBuilder](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/IndexBuilder.java)
 
 ```text
 while offset < readChannel.size():
@@ -43,7 +43,7 @@ A scanner must visit even overwritten records to find the next boundary. Mutatio
 | A key occupies exactly one local state. | Serial map/set updates maintain exclusivity. An unsynchronized observer can see a transition in progress. A force failure leaves both structures in their pre-call state even if a complete record exists. |
 | A present offset names a normal record with the indexed key. | Capture on a single exclusively owned append channel, or replay using the decoded key at its actual start, establishes the relationship. `markPresent` only checks the sign. `SegmentReader` additionally checks the configured upper bound and the record checksum. It never compares the decoded key with the request or checks the decoded type. A misdirected offset to a different valid record can silently return another value or an empty tombstone payload. This failure requires a broken index-to-file association. |
 | Indexed records are readable. | An address outside the configured bound throws `IllegalStateException`, even if the index was correctly rebuilt. An address inside the bound but outside the file fails when read. An address in the middle of a record usually fails type, length or checksum validation. [Segment management](segment-management.md) |
-| Replay yields either a complete usable segment or a failed open. | `IndexBuilder` returns the new index only after the whole scan. An I/O error is wrapped as `IndexBuildException`. A corruption exception propagates directly, leaving the partial index unpublished. Previously opened channels can escape cleanup. In-memory deleted markers also bypass rereading their tombstones, so later on-disk damage may first surface on reopen. [Concurrency and lifecycle](concurrency-and-lifecycle.md) |
+| Replay yields either a complete usable segment or a failed open. | `IndexBuilder` returns the new index only after reaching EOF at a record boundary. It wraps I/O failures, incomplete records and configured payload-limit failures as `IndexBuildException` and retains their causes. A corruption exception propagates directly and can bypass channel cleanup. In-memory deleted markers bypass rereading their tombstones, so later on-disk damage may first surface on reopen. [Concurrency and lifecycle](concurrency-and-lifecycle.md) |
 
 ## Cost and alternatives
 

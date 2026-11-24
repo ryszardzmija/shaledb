@@ -1,18 +1,20 @@
 package com.ryszardzmija.shaledb.storage.serialization.io;
 
+import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException.Section;
+import com.ryszardzmija.shaledb.storage.serialization.record.RecordPayload;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
 import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo;
-import com.ryszardzmija.shaledb.storage.serialization.record.RecordPayload;
 import com.ryszardzmija.shaledb.storage.serialization.spec.RecordTypeCodec;
 import com.ryszardzmija.shaledb.storage.serialization.spec.TypeDecodingException;
 
 import java.io.IOException;
-import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.Objects;
 import java.util.zip.CRC32C;
 import java.util.zip.Checksum;
+
+import static com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException.MAX_CONSECUTIVE_ZERO_TRANSFERS;
 
 public class RecordReader {
     private final FileChannel readChannel;
@@ -23,12 +25,20 @@ public class RecordReader {
         this.maxPayloadSize = maxPayloadSize;
     }
 
+    /** Reads one expected record, including checksum verification and its next file offset. */
     public ReadResult read(ReadRequest request) {
         long offset = request.offset();
 
         try {
-            ByteBuffer headerBuffer = ByteBuffer.allocate(FormatInfo.getHeaderSize()).order(FormatInfo.BYTE_ORDER);
-            readIntoBuffer(headerBuffer, offset);
+            long fileSize = readChannel.size();
+            if (offset > fileSize) {
+                throw new IllegalArgumentException("Record offset %d is beyond file size %d".formatted(offset, fileSize));
+            }
+            long bytesRemaining = fileSize - offset;
+            int headerSize = FormatInfo.getHeaderSize();
+            requireAvailable(Section.HEADER, offset, headerSize, bytesRemaining);
+            ByteBuffer headerBuffer = ByteBuffer.allocate(headerSize).order(FormatInfo.BYTE_ORDER);
+            readFully(headerBuffer, offset, offset, Section.HEADER);
             headerBuffer.flip();
 
             byte[] storedChecksum = new byte[FormatInfo.CHECKSUM_FIELD_SIZE];
@@ -41,8 +51,13 @@ public class RecordReader {
             int valueDataSize = headerBuffer.getInt();
 
             int payloadSize = readPayloadSize(recordType, keyDataSize, valueDataSize, offset);
+            int encodedRecordSize = FormatInfo.getEncodedRecordSize(payloadSize);
+            requireAvailable(Section.PAYLOAD, offset, payloadSize, bytesRemaining - headerSize);
+            // Both section ends are at or below fileSize, so these sums fit in long.
+            long payloadOffset = offset + headerSize;
+            long nextRecordOffset = offset + encodedRecordSize;
             ByteBuffer dataBuffer = ByteBuffer.allocate(payloadSize).order(FormatInfo.BYTE_ORDER);
-            readIntoBuffer(dataBuffer, offset + FormatInfo.getHeaderSize());
+            readFully(dataBuffer, payloadOffset, offset, Section.PAYLOAD);
 
             headerBuffer.rewind();
             headerBuffer.position(FormatInfo.CHECKSUM_FIELD_SIZE);
@@ -60,11 +75,7 @@ public class RecordReader {
             dataBuffer.get(keyData);
             dataBuffer.get(valueData);
 
-            long nextRecordOffset = offset + FormatInfo.getEncodedRecordSize(payloadSize);
-
             return new ReadResult(new RecordPayload(keyData, valueData), recordType, nextRecordOffset);
-        } catch (BufferUnderflowException e) {
-            throw new DataCorruptionException("Unexpected end of record data", offset, e);
         } catch (TypeDecodingException e) {
             throw new DataCorruptionException("Error decoding record type", offset, e);
         } catch (IOException e) {
@@ -72,11 +83,24 @@ public class RecordReader {
         }
     }
 
-    private void readIntoBuffer(ByteBuffer buffer, long offset) throws IOException {
+    private static void requireAvailable(Section section, long recordOffset, int expected, long available) {
+        if (available < expected) {
+            // The extent checks guarantee 0 <= available < expected <= Integer.MAX_VALUE.
+            throw new IncompleteRecordException(section, recordOffset, expected, (int) available);
+        }
+    }
+
+    private void readFully(ByteBuffer buffer, long sectionOffset, long recordOffset, Section section) throws IOException {
+        int consecutiveZeroReads = 0;
         while (buffer.hasRemaining()) {
-            int bytesRead = readChannel.read(buffer, offset + buffer.position());
-            if (bytesRead == -1) {
-                throw new DataCorruptionException("Unexpected end of record data", offset);
+            int bytesRead = readChannel.read(buffer, sectionOffset + buffer.position());
+            if (bytesRead > 0) {
+                consecutiveZeroReads = 0;
+            } else if (bytesRead == -1) {
+                throw new IncompleteRecordException(section, recordOffset, buffer.limit(), buffer.position());
+            } else if (++consecutiveZeroReads == MAX_CONSECUTIVE_ZERO_TRANSFERS) {
+                throw new RecordIOException.NoProgress("No progress reading record %s at offset %d"
+                        .formatted(section, recordOffset));
             }
         }
     }
@@ -84,6 +108,8 @@ public class RecordReader {
     private int readPayloadSize(RecordType type, int keyLength, int valueLength, long offset) {
         try {
             return FormatInfo.getPayloadSize(type, keyLength, valueLength, maxPayloadSize);
+        } catch (FormatInfo.PayloadLimitExceededException e) {
+            throw e;
         } catch (IllegalArgumentException e) {
             throw new DataCorruptionException(e.getMessage(), offset, e);
         }

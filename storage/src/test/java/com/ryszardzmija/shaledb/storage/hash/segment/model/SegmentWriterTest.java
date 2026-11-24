@@ -40,7 +40,7 @@ class SegmentWriterTest {
         long offset = 0L;
 
         when(recordWriter.write(any(WriteRequest.class)))
-                .thenReturn(new WriteResult(offset));
+                .thenReturn(new WriteResult(offset, 15));
 
         segmentWriter.put(key, value);
 
@@ -59,7 +59,7 @@ class SegmentWriterTest {
 
         ArgumentCaptor<WriteRequest> requestCaptor = ArgumentCaptor.forClass(WriteRequest.class);
         when(recordWriter.write(requestCaptor.capture()))
-                .thenReturn(new WriteResult(offset));
+                .thenReturn(new WriteResult(offset, 15));
 
         segmentWriter.put(key, value);
 
@@ -94,7 +94,7 @@ class SegmentWriterTest {
         RecordIOException exception = new RecordIOException("flush failed", new IOException("error"));
 
         when(recordWriter.write(any(WriteRequest.class)))
-                .thenReturn(new WriteResult(offset));
+                .thenReturn(new WriteResult(offset, 15));
         doThrow(exception).when(recordWriter).flushToStorage();
 
         assertThatThrownBy(() -> segmentWriter.put(key, value))
@@ -125,7 +125,7 @@ class SegmentWriterTest {
 
         ArgumentCaptor<WriteRequest> requestCaptor = ArgumentCaptor.forClass(WriteRequest.class);
         when(recordWriter.write(requestCaptor.capture()))
-                .thenReturn(new WriteResult(offset));
+                .thenReturn(new WriteResult(offset, 14));
 
         segmentWriter.delete(key);
 
@@ -158,7 +158,7 @@ class SegmentWriterTest {
         RecordIOException exception = new RecordIOException("flush failed", new IOException("error"));
 
         when(recordWriter.write(any(WriteRequest.class)))
-                .thenReturn(new WriteResult(offset));
+                .thenReturn(new WriteResult(offset, 14));
         doThrow(exception).when(recordWriter).flushToStorage();
 
         assertThatThrownBy(() -> segmentWriter.delete(key))
