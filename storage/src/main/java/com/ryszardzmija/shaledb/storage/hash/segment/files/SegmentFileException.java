@@ -11,4 +11,10 @@ public class SegmentFileException extends RuntimeException {
     public SegmentFileException(String message, Throwable cause) {
         super(message, cause);
     }
+
+    public static class IdExhausted extends SegmentFileException {
+        IdExhausted(String message) {
+            super(message);
+        }
+    }
 }

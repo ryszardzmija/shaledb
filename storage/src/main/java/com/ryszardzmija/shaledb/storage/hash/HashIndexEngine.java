@@ -23,6 +23,7 @@ import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
 import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo;
 
+import java.nio.file.Path;
 import java.util.*;
 
 public class HashIndexEngine implements StorageEngine {
@@ -41,13 +42,19 @@ public class HashIndexEngine implements StorageEngine {
             SegmentConfig segmentConfig = SegmentConfig.from(storageConfig);
             DurabilityConfig durabilityConfig = DurabilityConfig.from(storageConfig);
 
-            SegmentFileFactory segmentFileFactory = new SegmentFileFactory(storageConfig.segmentDir(), new FileSystemSync());
+            Path segmentDir = storageConfig.segmentDir();
+            NavigableMap<Long, Path> discovered = new SegmentFileDiscoverer(segmentDir).discoverSegmentFiles();
+            Map.Entry<Long, Path> latest = discovered.lastEntry();
+            FileSystemSync fileSystemSync = new FileSystemSync();
+            SegmentFileFactory segmentFileFactory = new SegmentFileFactory(segmentDir, fileSystemSync,
+                    latest == null ? 0 : latest.getKey());
             this.rolloverPolicy = new SizeBasedRolloverPolicy(segmentConfig.maxSegmentSize());
-            this.rolloverHandler = new RolloverHandler(segmentFileFactory, new FileSystemSync(), segmentConfig, durabilityConfig);
-            SegmentFileDiscoverer segmentFileDiscoverer = new SegmentFileDiscoverer(storageConfig.segmentDir());
+            this.rolloverHandler = new RolloverHandler(segmentFileFactory, fileSystemSync, segmentConfig, durabilityConfig);
             SegmentLoader segmentLoader = new SegmentLoader(segmentConfig, durabilityConfig);
 
-            SegmentLayout segmentLayout = segmentFileDiscoverer.getSegmentFiles(segmentFileFactory);
+            SegmentLayout segmentLayout = latest == null
+                    ? new SegmentLayout(List.of(), segmentFileFactory.createSegmentFile())
+                    : new SegmentLayout(List.copyOf(discovered.headMap(latest.getKey(), false).values()), latest.getValue());
             LoadedSegments loadedSegments = segmentLoader.loadSegments(segmentLayout);
             this.immutableSegments = loadedSegments.immutableSegments();
             this.mutableSegment = loadedSegments.mutableSegment();
@@ -185,9 +192,8 @@ public class HashIndexEngine implements StorageEngine {
                     return Reason.INVALID_RECORD_LOCATION;
                 }
                 case IndexConsistencyException _ -> { return Reason.INVALID_INDEX_REFERENCE; }
-                case SegmentFileDiscoveryException discovery when discovery.getCause() instanceof NumberFormatException -> {
-                    return Reason.INVALID_SEGMENT_METADATA;
-                }
+                case SegmentFileDiscoveryException.InvalidLayout _ -> { return Reason.INVALID_SEGMENT_METADATA; }
+                case SegmentFileException.IdExhausted _ -> { return Reason.SEGMENT_ID_EXHAUSTED; }
                 default -> { /* Continue through contextual wrappers. */ }
             }
         }

@@ -43,7 +43,7 @@ At build time `server_lib` depends on both `//api:api` and `//storage:storage`. 
 
 ## Opening a store
 
-The constructor derives segment and durability settings, instantiates the factory (which scans for the maximum ID), rollover policy and handler, discoverer and loader. Discovery lists and sorts the paths or creates the first file. The loader opens older segments newest first and the active segment last. Each open scans its file from start to end, building a fresh index of key states and discarding decoded values. The engine takes ownership of the resulting segment objects only after the load succeeds. Reopening uses this same path. [Segment management](segment-management.md) · [Indexing](indexing.md)
+The constructor discovers and validates the segment layout in one directory scan. The greatest numeric ID determines the active segment and seeds the factory's allocation counter. When the layout is empty, the factory creates and synchronizes the first file. The loader opens older segments newest first and the active segment last. Each open scans its file from start to end, building a fresh index of key states and discarding decoded values. The engine takes ownership of the resulting segment objects only after the load succeeds. Reopening uses this same path. [Segment management](segment-management.md) · [Indexing](indexing.md)
 
 ## Put and delete
 

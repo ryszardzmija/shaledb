@@ -6,6 +6,7 @@ import com.ryszardzmija.shaledb.storage.StorageEngineException.Reason;
 import com.ryszardzmija.shaledb.storage.config.StorageConfig;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityMode;
 import com.ryszardzmija.shaledb.storage.hash.index.IndexBuildException;
+import com.ryszardzmija.shaledb.storage.hash.segment.files.SegmentFileDiscoveryException;
 import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoadingException;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.IndexConsistencyException;
 import com.ryszardzmija.shaledb.storage.serialization.io.DataCorruptionException;
@@ -108,14 +109,45 @@ class KeyValueStoreFailureTest {
     }
 
     @Test
-    void startupPreservesTheFilesystemCauseOfAnUnopenableSegment() throws IOException {
-        Path missing = directory.resolve("missing");
-        Files.createSymbolicLink(segment(1), missing);
+    void startupPreservesTheFilesystemCauseOfAMissingDirectory() {
+        Path missing = directory.resolve("missing-directory");
+        StorageConfig config = new StorageConfig(256, 128, missing, DurabilityMode.SYNC_EACH_WRITE);
 
-        StorageEngineException failure = openFailure(config(128, 256), Reason.STORAGE_IO);
+        StorageEngineException failure = openFailure(config, Reason.STORAGE_IO);
 
-        assertThat(failure.getCause()).isInstanceOf(SegmentLoadingException.class);
+        assertThat(failure.getCause()).isInstanceOf(SegmentFileDiscoveryException.class);
         assertThat(failure).hasRootCauseInstanceOf(NoSuchFileException.class);
+        assertThat(missing).doesNotExist();
+    }
+
+    @Test
+    void startupRejectsABrokenSegmentSymlinkAndLeavesItInPlace() throws IOException {
+        Path missing = directory.resolve("missing");
+        Path link = Files.createSymbolicLink(segment(1), missing);
+
+        StorageEngineException failure = openFailure(config(128, 256), Reason.INVALID_SEGMENT_METADATA);
+
+        assertThat(failure.getCause()).isInstanceOf(SegmentFileDiscoveryException.InvalidLayout.class)
+                .hasMessageContaining(link.toString());
+        assertThat(Files.readSymbolicLink(link)).isEqualTo(missing);
+        assertThat(missing).doesNotExist();
+    }
+
+    @Test
+    void startupRejectsDuplicateIdsAndPreservesBothFiles() throws IOException {
+        createRecord();
+        byte[] original = Files.readAllBytes(segment(1));
+        Path duplicate = Files.write(directory.resolve("segment_000001.log"), new byte[] {19});
+
+        StorageEngineException failure = openFailure(config(128, 256), Reason.INVALID_SEGMENT_METADATA);
+
+        assertThat(failure.getCause()).isInstanceOf(SegmentFileDiscoveryException.InvalidLayout.class)
+                .hasMessageContaining("Duplicate segment ID 1")
+                .hasMessageContaining(segment(1).toString())
+                .hasMessageContaining(duplicate.toString());
+        assertThat(Files.readAllBytes(segment(1))).containsExactly(original);
+        assertThat(Files.readAllBytes(duplicate)).containsExactly(19);
+        assertThat(segmentCount(directory)).isEqualTo(2);
     }
 
     @Test
@@ -124,6 +156,28 @@ class KeyValueStoreFailureTest {
 
         assertThat(openFailure(config(128, 256), Reason.INVALID_SEGMENT_METADATA))
                 .hasRootCauseInstanceOf(NumberFormatException.class);
+    }
+
+    @Test
+    void opensTheMaximumSegmentIdAndFailsOnlyWhenRolloverNeedsASuccessor() throws IOException {
+        createRecord();
+        Path last = Files.move(segment(1), segment(Long.MAX_VALUE));
+        byte[] replacement = {7, 8};
+
+        StorageConfig smallSegments = config(3, 16);
+        try (KeyValueStore store = new KeyValueStore(smallSegments)) {
+            assertValue(store, KEY, VALUE);
+            assertThat(assertFailure(() -> store.put(KEY, replacement), Operation.PUT,
+                    Reason.SEGMENT_ID_EXHAUSTED, MutationOutcome.FORCE_COMPLETED))
+                    .hasRootCauseMessage("Segment IDs exhausted at " + Long.MAX_VALUE + " in " + directory);
+            assertValue(store, KEY, replacement);
+        }
+        try (var files = Files.list(directory)) {
+            assertThat(files).containsExactly(last);
+        }
+        try (KeyValueStore store = new KeyValueStore(smallSegments)) {
+            assertValue(store, KEY, replacement);
+        }
     }
 
     @Test

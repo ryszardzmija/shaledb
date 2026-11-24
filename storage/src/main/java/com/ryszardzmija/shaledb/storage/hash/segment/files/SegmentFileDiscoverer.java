@@ -1,57 +1,69 @@
 package com.ryszardzmija.shaledb.storage.hash.segment.files;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
+import java.nio.file.DirectoryIteratorException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.util.*;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.NavigableMap;
+import java.util.Objects;
+import java.util.TreeMap;
 
 public class SegmentFileDiscoverer {
     private final Path segmentDir;
 
     public SegmentFileDiscoverer(Path segmentDir) {
         this.segmentDir = Objects.requireNonNull(segmentDir);
-        SegmentFileFactory.requireDirectory(this.segmentDir);
     }
 
     /**
-     * Returns {@link SegmentLayout} with paths to mutable and immutable segments.
-     *
-     * @param segmentFileFactory a {@link SegmentFileFactory} object
-     * @return a {@link SegmentLayout} with paths to mutable and immutable segment paths
-     * @throws SegmentFileDiscoveryException if the directory cannot be read
-     * @throws SegmentFileException if no files exist and the initial file cannot be created
+     * Returns validated segment paths ordered by ID, oldest first. An empty result means the
+     * directory was read successfully and contains no segment entries.
      */
-    public SegmentLayout getSegmentFiles(SegmentFileFactory segmentFileFactory) {
-        List<Path> discoveredFiles = discoverSegmentFiles();
+    public NavigableMap<Long, Path> discoverSegmentFiles() {
+        NavigableMap<Long, Path> segments = new TreeMap<>();
+        Map<Object, Path> fileKeys = new HashMap<>();
+        try (DirectoryStream<Path> entries = Files.newDirectoryStream(segmentDir)) {
+            for (Path path : entries) {
+                String filename = path.getFileName().toString();
+                if (!FileFormatInfo.isSegmentName(filename)) {
+                    continue;
+                }
 
-        if (discoveredFiles.isEmpty()) {
-            Path mutableSegmentPath = segmentFileFactory.createSegmentFile();
-            return new SegmentLayout(Collections.emptyList(), mutableSegmentPath);
-        }
+                long id;
+                try {
+                    id = FileFormatInfo.parseId(filename);
+                } catch (NumberFormatException e) {
+                    throw new SegmentFileDiscoveryException.InvalidLayout("Invalid segment filename: " + path, e);
+                }
+                BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class,
+                        LinkOption.NOFOLLOW_LINKS);
+                if (!attributes.isRegularFile()) {
+                    throw new SegmentFileDiscoveryException.InvalidLayout("Segment must be a regular file: " + path);
+                }
+                Path duplicate = segments.putIfAbsent(id, path);
+                if (duplicate != null) {
+                    throw new SegmentFileDiscoveryException.InvalidLayout(
+                            "Duplicate segment ID " + id + " in " + duplicate + " and " + path);
+                }
 
-        Path mutableSegment = discoveredFiles.getLast();
-        discoveredFiles.removeLast();
-
-        return new SegmentLayout(List.copyOf(discoveredFiles), mutableSegment);
-    }
-
-    /**
-     * Returns all segment files found in the segment directory, ordered from oldest to newest.
-     *
-     * @return an ordered list of paths to segment files, empty if no segment paths exist
-     * @throws SegmentFileDiscoveryException if the segment directory is invalid or cannot be read
-     */
-    private List<Path> discoverSegmentFiles() {
-        try (Stream<Path> files = Files.list(segmentDir)) {
-            return files
-                    .filter(p -> p.getFileName().toString().matches(FileFormatInfo.getReadFileRegex()))
-                    .sorted(Comparator.comparingLong(FileFormatInfo::extractId))
-                    .collect(Collectors.toCollection(ArrayList::new));
-        } catch (IOException | UncheckedIOException e) {
+                Object fileKey = attributes.fileKey();
+                if (fileKey != null) {
+                    Path alias = fileKeys.putIfAbsent(fileKey, path);
+                    if (alias != null) {
+                        throw new SegmentFileDiscoveryException.InvalidLayout(
+                                "Segment paths refer to the same file: " + alias + " and " + path);
+                    }
+                }
+            }
+        } catch (IOException | DirectoryIteratorException | UnsupportedOperationException | SecurityException e) {
             throw new SegmentFileDiscoveryException("Error discovering segment files in " + segmentDir, e);
         }
+        return Collections.unmodifiableNavigableMap(segments);
     }
 }

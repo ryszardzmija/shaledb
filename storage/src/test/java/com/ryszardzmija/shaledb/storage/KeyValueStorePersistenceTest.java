@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertValue;
@@ -130,6 +131,55 @@ class KeyValueStorePersistenceTest {
             assertValue(store, hex(FILLER_KEY), new byte[FILLER_VALUE_SIZE]);
             assertThat(store.get(deleted)).isEmpty();
             assertThat(store.get(missing)).isEmpty();
+        }
+    }
+
+    @Test
+    void reopensMixedFilenameFormatsInNumericOrderAndRollsOverPastTheLargestId() throws IOException {
+        var config = config(tempDir, SMALL_SEGMENT_SIZE);
+        byte[] deleted = hex("01");
+        byte[] historical = hex("02");
+        byte[] activeKey = hex("03");
+        byte[] newKey = hex("04");
+
+        try (var store = new KeyValueStore(config)) {
+            store.put(deleted, hex("10"));
+            store.put(historical, hex("20"));
+            advanceToNewSegment(store);
+            store.delete(deleted);
+            advanceToNewSegment(store);
+            store.put(activeKey, hex("30"));
+        }
+
+        Path oldest = Files.move(tempDir.resolve("segment_0000000000000000001.log"),
+                tempDir.resolve("segment_9.log"));
+        Path tombstones = Files.move(tempDir.resolve("segment_0000000000000000002.log"),
+                tempDir.resolve("segment_" + "٠".repeat(17) + "١٠.log"));
+        Path active = Files.move(tempDir.resolve("segment_0000000000000000003.log"),
+                tempDir.resolve("segment_0000000000000000100.log"));
+        byte[] oldestBytes = Files.readAllBytes(oldest);
+        byte[] tombstoneBytes = Files.readAllBytes(tombstones);
+        long activeSize = Files.size(active);
+
+        try (var store = new KeyValueStore(config)) {
+            assertThat(store.get(deleted)).isEmpty();
+            assertValue(store, historical, hex("20"));
+            assertValue(store, activeKey, hex("30"));
+            store.put(newKey, hex("40"));
+            assertThat(Files.size(active)).isGreaterThan(activeSize);
+            advanceToNewSegment(store);
+        }
+        Path successor = tempDir.resolve("segment_0000000000000000101.log");
+        try (var files = Files.list(tempDir)) {
+            assertThat(files).containsExactlyInAnyOrder(oldest, tombstones, active, successor);
+        }
+        assertThat(Files.readAllBytes(oldest)).containsExactly(oldestBytes);
+        assertThat(Files.readAllBytes(tombstones)).containsExactly(tombstoneBytes);
+        try (var store = new KeyValueStore(config)) {
+            assertThat(store.get(deleted)).isEmpty();
+            assertValue(store, historical, hex("20"));
+            assertValue(store, activeKey, hex("30"));
+            assertValue(store, newKey, hex("40"));
         }
     }
 

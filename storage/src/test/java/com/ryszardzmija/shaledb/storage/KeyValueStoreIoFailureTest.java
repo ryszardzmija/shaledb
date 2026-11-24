@@ -14,9 +14,11 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Set;
 
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertFailure;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.invalidHeader;
+import static java.nio.file.StandardOpenOption.CREATE_NEW;
 import static java.nio.file.StandardOpenOption.READ;
 import static java.nio.file.StandardOpenOption.WRITE;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -126,6 +128,7 @@ class KeyValueStoreIoFailureTest {
         try (MockedStatic<FileChannel> channels = mockStatic(FileChannel.class)) {
             channels.when(() -> FileChannel.open(active, READ)).thenReturn(reader).thenThrow(immutableOpenFailure);
             channels.when(() -> FileChannel.open(active, WRITE)).thenReturn(writer);
+            createRealFileThroughMock(channels, replacement);
             channels.when(() -> FileChannel.open(replacement, READ)).thenReturn(replacementReader);
             channels.when(() -> FileChannel.open(replacement, WRITE)).thenReturn(replacementWriter);
             channels.when(() -> FileChannel.open(directory, READ)).thenReturn(directoryChannel);
@@ -224,12 +227,42 @@ class KeyValueStoreIoFailureTest {
     }
 
     @Test
+    void startupPreservesFileForceFailureAndSuppressedFileCloseFailure() throws IOException {
+        FileChannel newFile = mock(FileChannel.class);
+        FileChannel directoryChannel = mock(FileChannel.class);
+        Path first = directory.resolve("segment_0000000000000000001.log");
+        IOException forceFailure = new IOException("failed new file force");
+        IOException closeFailure = new IOException("failed new file close");
+        doThrow(forceFailure).when(newFile).force(true);
+        doThrow(closeFailure).when(newFile).close();
+        try (MockedStatic<FileChannel> channels = mockStatic(FileChannel.class)) {
+            channels.when(() -> FileChannel.open(first, WRITE, CREATE_NEW)).thenAnswer(call -> {
+                Files.createFile(first);
+                return newFile;
+            });
+            channels.when(() -> FileChannel.open(directory, READ)).thenReturn(directoryChannel);
+
+            StorageEngineException failure = assertFailure(this::open, Operation.OPEN, Reason.DURABILITY,
+                    MutationOutcome.NOT_APPLICABLE);
+            assertThat(failure).hasRootCause(forceFailure);
+            assertThat(failure.getCause().getCause()).isInstanceOfSatisfying(DurabilityException.class, cause -> {
+                assertThat(cause.target()).isEqualTo(DurabilityException.Target.FILE);
+                assertThat(cause.getSuppressed()).containsExactly(closeFailure);
+            });
+            assertThat(first).doesNotExist();
+            verify(newFile).close();
+            verify(directoryChannel).force(true);
+        }
+    }
+
+    @Test
     void startupPreservesDirectoryForceFailureAndCleanupFailure() throws IOException {
         FileChannel directoryChannel = mock(FileChannel.class);
         IOException forceFailure = new IOException("failed directory force");
         IOException cleanupFailure = new IOException("failed cleanup directory force");
         doThrow(forceFailure).doThrow(cleanupFailure).when(directoryChannel).force(true);
         try (MockedStatic<FileChannel> channels = mockStatic(FileChannel.class)) {
+            createRealFileThroughMock(channels, directory.resolve("segment_0000000000000000001.log"));
             channels.when(() -> FileChannel.open(directory, READ)).thenReturn(directoryChannel);
 
             StorageEngineException failure = assertFailure(this::open, Operation.OPEN, Reason.DURABILITY,
@@ -250,12 +283,18 @@ class KeyValueStoreIoFailureTest {
         IOException closeFailure = new IOException("failed directory close");
         doThrow(closeFailure).when(directoryChannel).close();
         try (MockedStatic<FileChannel> channels = mockStatic(FileChannel.class)) {
+            createRealFileThroughMock(channels, directory.resolve("segment_0000000000000000001.log"));
             channels.when(() -> FileChannel.open(directory, READ)).thenReturn(directoryChannel);
 
             assertThat(assertFailure(this::open, Operation.OPEN, Reason.STORAGE_IO, MutationOutcome.NOT_APPLICABLE))
                     .hasRootCause(closeFailure);
             assertThat(KeyValueStoreTestSupport.segmentCount(directory)).isOne();
         }
+    }
+
+    private static void createRealFileThroughMock(MockedStatic<FileChannel> channels, Path path) {
+        channels.when(() -> FileChannel.open(path, WRITE, CREATE_NEW))
+                .thenAnswer(call -> path.getFileSystem().provider().newFileChannel(path, Set.of(WRITE, CREATE_NEW)));
     }
 
     private void completeWrites() throws IOException {

@@ -5,20 +5,34 @@ import com.ryszardzmija.shaledb.storage.durability.FileSystemSync;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
+import org.mockito.ArgumentCaptor;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class SegmentFileFactoryTest {
+    private static final String FIRST_FILENAME = "segment_0000000000000000001.log";
+    private static final String SECOND_FILENAME = "segment_0000000000000000002.log";
+
     @TempDir
     Path tempDir;
 
@@ -28,15 +42,23 @@ class SegmentFileFactoryTest {
     @BeforeEach
     void setUp() {
         fileSystemSync = mock(FileSystemSync.class);
-        factory = new SegmentFileFactory(tempDir, fileSystemSync);
+        factory = new SegmentFileFactory(tempDir, fileSystemSync, 0);
     }
 
     @Test
+    @ResourceLock(Resources.LOCALE)
     void createsFirstSegmentFileInEmptyDirectory() throws IOException {
-        Path segmentFile = factory.createSegmentFile();
+        Locale original = Locale.getDefault(Locale.Category.FORMAT);
+        Path segmentFile;
+        try {
+            Locale.setDefault(Locale.Category.FORMAT, Locale.forLanguageTag("ar-EG-u-nu-arab"));
+            segmentFile = factory.createSegmentFile();
+        } finally {
+            Locale.setDefault(Locale.Category.FORMAT, original);
+        }
 
         assertThat(segmentFile.getParent()).isEqualTo(tempDir);
-        assertThat(segmentFile.getFileName().toString()).isEqualTo(FileFormatInfo.getWriteFileFormat().formatted(FileFormatInfo.getFirstId()));
+        assertThat(segmentFile.getFileName().toString()).isEqualTo(FIRST_FILENAME);
         assertThat(segmentFile).exists().isRegularFile();
 
         try (Stream<Path> files = Files.list(tempDir)) {
@@ -46,22 +68,32 @@ class SegmentFileFactoryTest {
 
     @Test
     void createsSegmentFileAfterHighestExistingId() throws IOException {
-        Files.createFile(tempDir.resolve(FileFormatInfo.getWriteFileFormat().formatted(FileFormatInfo.getFirstId())));
-        Files.createFile(tempDir.resolve(FileFormatInfo.getWriteFileFormat().formatted(FileFormatInfo.getFirstId() + 1)));
-        // segment directory is scanned at object creation
-        factory = new SegmentFileFactory(tempDir, fileSystemSync);
+        Files.createFile(tempDir.resolve(FIRST_FILENAME));
+        Files.createFile(tempDir.resolve("segment_17.log"));
+        long latestId = new SegmentFileDiscoverer(tempDir).discoverSegmentFiles().lastKey();
+        factory = new SegmentFileFactory(tempDir, fileSystemSync, latestId);
 
         Path segmentFile = factory.createSegmentFile();
 
-        assertThat(segmentFile.getFileName().toString()).isEqualTo(FileFormatInfo.getWriteFileFormat().formatted(FileFormatInfo.getFirstId() + 2));
+        assertThat(segmentFile.getFileName().toString()).isEqualTo("segment_0000000000000000018.log");
         assertThat(segmentFile).exists().isRegularFile();
     }
 
     @Test
-    void flushesSegmentDirectoryAfterCreatingSegmentFile() {
+    void forcesTheOpenFileBeforeForcingItsDirectoryAndClosesTheChannel() {
+        doAnswer(call -> {
+            FileChannel channel = call.getArgument(0);
+            assertThat(channel.isOpen()).isTrue();
+            return null;
+        }).when(fileSystemSync).forceFile(any(FileChannel.class));
+
         factory.createSegmentFile();
 
-        verify(fileSystemSync).forceDirectory(tempDir);
+        var channel = ArgumentCaptor.forClass(FileChannel.class);
+        var ordering = inOrder(fileSystemSync);
+        ordering.verify(fileSystemSync).forceFile(channel.capture());
+        ordering.verify(fileSystemSync).forceDirectory(tempDir);
+        assertThat(channel.getValue().isOpen()).isFalse();
     }
 
     @Test
@@ -71,7 +103,7 @@ class SegmentFileFactoryTest {
                 .doNothing()
                 .when(fileSystemSync)
                 .forceDirectory(tempDir);
-        Path segmentFile = tempDir.resolve(FileFormatInfo.getWriteFileFormat().formatted(FileFormatInfo.getFirstId()));
+        Path segmentFile = tempDir.resolve(FIRST_FILENAME);
 
         assertThatThrownBy(() -> factory.createSegmentFile())
                 .isInstanceOf(SegmentFileException.class)
@@ -80,7 +112,7 @@ class SegmentFileFactoryTest {
 
         Path nextSegmentFile = factory.createSegmentFile().getFileName();
 
-        assertThat(nextSegmentFile.toString()).isEqualTo(FileFormatInfo.getWriteFileFormat().formatted(FileFormatInfo.getFirstId() + 1));
+        assertThat(nextSegmentFile.toString()).isEqualTo(SECOND_FILENAME);
         verify(fileSystemSync, times(3)).forceDirectory(tempDir);
     }
 
@@ -89,8 +121,8 @@ class SegmentFileFactoryTest {
         Path first = factory.createSegmentFile().getFileName();
         Path second = factory.createSegmentFile().getFileName();
 
-        assertThat(first.toString()).isEqualTo(FileFormatInfo.getWriteFileFormat().formatted(FileFormatInfo.getFirstId()));
-        assertThat(second.toString()).isEqualTo(FileFormatInfo.getWriteFileFormat().formatted(FileFormatInfo.getFirstId() + 1));
+        assertThat(first.toString()).isEqualTo(FIRST_FILENAME);
+        assertThat(second.toString()).isEqualTo(SECOND_FILENAME);
     }
 
     @Test
@@ -99,7 +131,7 @@ class SegmentFileFactoryTest {
                 .doNothing()
                 .when(fileSystemSync)
                 .forceDirectory(tempDir);
-        Path segmentFile = tempDir.resolve(FileFormatInfo.getWriteFileFormat().formatted(FileFormatInfo.getFirstId()));
+        Path segmentFile = tempDir.resolve(FIRST_FILENAME);
 
         assertThatThrownBy(() -> factory.createSegmentFile())
                 .isInstanceOf(SegmentFileException.class)
@@ -114,11 +146,65 @@ class SegmentFileFactoryTest {
     }
 
     @Test
-    void rejectsPathThatIsNotDirectory() throws IOException {
-        Path filePath = Files.createFile(tempDir.resolve("temp"));
+    void closesAndRemovesTheNewFileAfterFailedFileForce() throws IOException {
+        Path existing = Files.write(tempDir.resolve(FIRST_FILENAME), new byte[] {5});
+        Path next = tempDir.resolve(SECOND_FILENAME);
+        factory = new SegmentFileFactory(tempDir, fileSystemSync, 1);
+        var failure = new DurabilityException("file force failed", new IOException("I/O error"));
+        doThrow(failure).when(fileSystemSync).forceFile(any(FileChannel.class));
 
-        assertThatThrownBy(() -> new SegmentFileFactory(filePath, fileSystemSync))
+        assertThatThrownBy(factory::createSegmentFile)
                 .isInstanceOf(SegmentFileException.class)
-                .hasMessage(filePath + " is not a directory, expected a directory with segment files");
+                .hasCause(failure);
+
+        var channel = ArgumentCaptor.forClass(FileChannel.class);
+        verify(fileSystemSync).forceFile(channel.capture());
+        assertThat(channel.getValue().isOpen()).isFalse();
+        verify(fileSystemSync).forceDirectory(tempDir);
+        assertThat(next).doesNotExist();
+        assertThat(Files.readAllBytes(existing)).containsExactly(5);
+    }
+
+    @Test
+    void refusesToReplaceAnyExistingEntryAtTheAllocatedPath() throws IOException {
+        Path nonempty = Files.write(tempDir.resolve(FIRST_FILENAME), new byte[] {5});
+        Path empty = Files.createFile(tempDir.resolve(SECOND_FILENAME));
+        Path directory = Files.createDirectory(tempDir.resolve("segment_0000000000000000003.log"));
+        Path missingTarget = tempDir.resolve("missing");
+        Path symlink = Files.createSymbolicLink(tempDir.resolve("segment_0000000000000000004.log"), missingTarget);
+
+        for (Path path : new Path[] {nonempty, empty, directory, symlink}) {
+            assertThatThrownBy(factory::createSegmentFile)
+                    .isInstanceOf(SegmentFileException.class)
+                    .hasRootCauseInstanceOf(FileAlreadyExistsException.class)
+                    .hasMessageContaining(path.toString());
+        }
+        verifyNoInteractions(fileSystemSync);
+        assertThat(Files.readAllBytes(nonempty)).containsExactly(5);
+        assertThat(Files.size(empty)).isZero();
+        assertThat(directory).isDirectory();
+        assertThat(Files.readSymbolicLink(symlink)).isEqualTo(missingTarget);
+        assertThat(missingTarget).doesNotExist();
+    }
+
+    @Test
+    void allocatesTheMaximumIdOnceAndThenReportsExhaustion() {
+        factory = new SegmentFileFactory(tempDir, fileSystemSync, Long.MAX_VALUE - 1);
+        Path last = factory.createSegmentFile();
+
+        assertThat(last).isEqualTo(tempDir.resolve("segment_9223372036854775807.log")).isRegularFile();
+        assertThatThrownBy(factory::createSegmentFile)
+                .isInstanceOf(SegmentFileException.IdExhausted.class)
+                .hasMessageContaining(Long.toString(Long.MAX_VALUE));
+        verify(fileSystemSync).forceFile(any(FileChannel.class));
+        verify(fileSystemSync).forceDirectory(tempDir);
+    }
+
+    @Test
+    void rejectsNegativeAllocationStateAndNonpositiveFilenameIds() {
+        assertThatIllegalArgumentException().isThrownBy(() -> new SegmentFileFactory(tempDir, fileSystemSync, -1));
+        assertThatIllegalArgumentException().isThrownBy(() -> FileFormatInfo.filename(0));
+        assertThatIllegalArgumentException().isThrownBy(() -> FileFormatInfo.filename(-1));
+        verifyNoInteractions(fileSystemSync);
     }
 }
