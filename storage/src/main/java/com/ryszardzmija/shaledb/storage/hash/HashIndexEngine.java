@@ -2,8 +2,12 @@ package com.ryszardzmija.shaledb.storage.hash;
 
 import com.ryszardzmija.shaledb.storage.StorageEngine;
 import com.ryszardzmija.shaledb.storage.StorageEngineException;
+import com.ryszardzmija.shaledb.storage.StorageEngineException.MutationOutcome;
+import com.ryszardzmija.shaledb.storage.StorageEngineException.Operation;
+import com.ryszardzmija.shaledb.storage.StorageEngineException.Reason;
 import com.ryszardzmija.shaledb.storage.config.StorageConfig;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityConfig;
+import com.ryszardzmija.shaledb.storage.durability.DurabilityException;
 import com.ryszardzmija.shaledb.storage.durability.FileSystemSync;
 import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
 import com.ryszardzmija.shaledb.storage.hash.segment.files.*;
@@ -12,16 +16,16 @@ import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoader;
 import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoadingException;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.*;
 import com.ryszardzmija.shaledb.storage.hash.segment.rollover.*;
+import com.ryszardzmija.shaledb.storage.serialization.io.DataCorruptionException;
+import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException;
+import com.ryszardzmija.shaledb.storage.serialization.io.ReadRequest;
+import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
 import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.*;
 
 public class HashIndexEngine implements StorageEngine {
-    private static final Logger logger = LoggerFactory.getLogger(HashIndexEngine.class);
-
     private final RolloverPolicy rolloverPolicy;
     private final RolloverHandler rolloverHandler;
     private final long maxPayloadSize;
@@ -48,7 +52,8 @@ public class HashIndexEngine implements StorageEngine {
             this.immutableSegments = loadedSegments.immutableSegments();
             this.mutableSegment = loadedSegments.mutableSegment();
         } catch (SegmentFileException | SegmentFileDiscoveryException | SegmentLoadingException e) {
-            throw new StorageEngineException("Failed to initialize hash index storage engine", e);
+            throw failure(Operation.OPEN, MutationOutcome.NOT_APPLICABLE,
+                    "Failed to open store in " + storageConfig.segmentDir(), e);
         }
     }
 
@@ -63,18 +68,10 @@ public class HashIndexEngine implements StorageEngine {
         try {
             mutableSegment.put(new ByteKey(key), value);
         } catch (SegmentIOException e) {
-            throw new StorageEngineException("Failed to write segment", e);
+            throw failure(Operation.PUT, MutationOutcome.UNKNOWN, "Failed to append or force put", e);
         }
 
-        try {
-            handleRollover();
-        } catch (RolloverException e) {
-            // TODO: Decide whether to implement retry logic or wait for the next
-            // TODO: write for a retry. If the rollover keeps failing we should
-            // TODO: bound the size of the segment and probably refuse writes after
-            // TODO: some threshold is reached.
-            logger.warn("Rollover failed after successful write", e);
-        }
+        handleRollover(Operation.PUT);
     }
 
     @Override
@@ -101,7 +98,7 @@ public class HashIndexEngine implements StorageEngine {
 
             return Optional.empty();
         } catch (SegmentIOException e) {
-            throw new StorageEngineException("Failed to read segment", e);
+            throw failure(Operation.GET, MutationOutcome.NOT_APPLICABLE, "Failed to read indexed record", e);
         }
     }
 
@@ -124,42 +121,76 @@ public class HashIndexEngine implements StorageEngine {
         try {
             mutableSegment.delete(new ByteKey(key));
         } catch (SegmentIOException e) {
-            throw new StorageEngineException("Failed to write segment", e);
+            throw failure(Operation.DELETE, MutationOutcome.UNKNOWN, "Failed to append or force delete", e);
         }
 
-        try {
-            handleRollover();
-        } catch (RolloverException e) {
-            logger.warn("Rollover failed after successful delete", e);
-        }
+        handleRollover(Operation.DELETE);
     }
 
     @Override
     public void close() {
-        StorageEngineException exception = null;
-        try {
-            mutableSegment.sync();
+        SegmentIOException primaryFailure = null;
+        try (MutableSegment segment = mutableSegment) {
+            segment.sync();
         } catch (SegmentIOException e) {
-            exception = new StorageEngineException("Failed to flush writeable segment to persistent storage", e);
+            primaryFailure = e;
         }
-
-        mutableSegment.close();
 
         for (ImmutableSegment segment : immutableSegments) {
-            segment.close();
+            try {
+                segment.close();
+            } catch (SegmentIOException e) {
+                if (primaryFailure == null) {
+                    primaryFailure = e;
+                } else {
+                    primaryFailure.addSuppressed(e);
+                }
+            }
         }
 
-        if (exception != null) {
-            throw exception;
+        if (primaryFailure != null) {
+            throw failure(Operation.CLOSE, MutationOutcome.NOT_APPLICABLE, "Failed to close store", primaryFailure);
         }
     }
 
-    private void handleRollover() {
-        if (rolloverPolicy.shouldRollover(mutableSegment)) {
-            RolloverResult rolloverResult = rolloverHandler.rollOver(mutableSegment);
-            mutableSegment = rolloverResult.newMutableSegment();
-            immutableSegments.addFirst(rolloverResult.newImmutableSegment());
+    private void handleRollover(Operation operation) {
+        try {
+            if (rolloverPolicy.shouldRollover(mutableSegment)) {
+                RolloverResult rolloverResult = rolloverHandler.rollOver(mutableSegment);
+                mutableSegment = rolloverResult.newMutableSegment();
+                immutableSegments.addFirst(rolloverResult.newImmutableSegment());
+            }
+        } catch (SegmentIOException | RolloverException e) {
+            throw failure(operation, MutationOutcome.FORCE_COMPLETED, "Rollover check or handoff failed after mutation", e);
         }
+    }
+
+    private static StorageEngineException failure(
+            Operation operation, MutationOutcome outcome, String message, RuntimeException cause) {
+        return new StorageEngineException(message, cause, operation, classify(cause), outcome);
+    }
+
+    private static Reason classify(RuntimeException failure) {
+        // Only the primary cause determines the category. Suppressed failures describe cleanup.
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            switch (cause) {
+                case DurabilityException _ -> { return Reason.DURABILITY; }
+                case DataCorruptionException corruption -> {
+                    return corruption.kind() == DataCorruptionException.Kind.CHECKSUM
+                            ? Reason.CHECKSUM_CORRUPTION : Reason.STRUCTURAL_CORRUPTION;
+                }
+                case IncompleteRecordException _ -> { return Reason.INCOMPLETE_RECORD; }
+                case RecordIOException.ReadLimitExceeded _ -> { return Reason.INCOMPATIBLE_RECORD_SIZE; }
+                case RecordIOException.InvalidLocation _, ReadRequest.BeyondEnd _ -> {
+                    return Reason.INVALID_RECORD_LOCATION;
+                }
+                case SegmentFileDiscoveryException discovery when discovery.getCause() instanceof NumberFormatException -> {
+                    return Reason.INVALID_SEGMENT_METADATA;
+                }
+                default -> { /* Continue through contextual wrappers. */ }
+            }
+        }
+        return Reason.STORAGE_IO;
     }
 
     private static void validateKey(byte[] key) {

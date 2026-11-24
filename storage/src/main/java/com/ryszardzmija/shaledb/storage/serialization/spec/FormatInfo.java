@@ -40,7 +40,9 @@ public class FormatInfo {
 
         int payloadSize = requireRepresentablePayloadSize((long) keyLength + valueLength);
         if (payloadSize > maxPayloadSize) {
-            throw new PayloadLimitExceededException(payloadSize, maxPayloadSize);
+            throw new PayloadLimitExceededException(
+                    "Record payload size %d exceeds configured maxPayloadSize %d".formatted(payloadSize, maxPayloadSize),
+                    payloadSize, maxPayloadSize, PayloadLimitExceededException.Limit.CONFIGURED);
         }
         return payloadSize;
     }
@@ -54,16 +56,43 @@ public class FormatInfo {
 
     private static int requireRepresentablePayloadSize(long payloadSize) {
         int maxRepresentablePayloadSize = Integer.MAX_VALUE - getHeaderSize();
-        if (payloadSize <= 0 || payloadSize > maxRepresentablePayloadSize) {
+        if (payloadSize <= 0) {
             throw new IllegalArgumentException("Record payload size %d is outside the representable range [1, %d]"
                     .formatted(payloadSize, maxRepresentablePayloadSize));
+        }
+        if (payloadSize > maxRepresentablePayloadSize) {
+            throw new PayloadLimitExceededException(
+                    "Record payload size %d is outside the representable range [1, %d]"
+                            .formatted(payloadSize, maxRepresentablePayloadSize),
+                    payloadSize, maxRepresentablePayloadSize, PayloadLimitExceededException.Limit.IMPLEMENTATION);
         }
         return (int) payloadSize;
     }
 
     public static final class PayloadLimitExceededException extends IllegalArgumentException {
-        private PayloadLimitExceededException(int payloadSize, long maxPayloadSize) {
-            super("Record payload size %d exceeds configured maxPayloadSize %d".formatted(payloadSize, maxPayloadSize));
+        public enum Limit { CONFIGURED, IMPLEMENTATION }
+
+        private final long payloadSize;
+        private final long maxPayloadSize;
+        private final Limit limit;
+
+        private PayloadLimitExceededException(String message, long payloadSize, long maxPayloadSize, Limit limit) {
+            super(message);
+            this.payloadSize = payloadSize;
+            this.maxPayloadSize = maxPayloadSize;
+            this.limit = limit;
+        }
+
+        public long payloadSize() {
+            return payloadSize;
+        }
+
+        public long maxPayloadSize() {
+            return maxPayloadSize;
+        }
+
+        public Limit limit() {
+            return limit;
         }
     }
 }

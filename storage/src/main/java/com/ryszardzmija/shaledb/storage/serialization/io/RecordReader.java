@@ -32,7 +32,7 @@ public class RecordReader {
         try {
             long fileSize = readChannel.size();
             if (offset > fileSize) {
-                throw new IllegalArgumentException("Record offset %d is beyond file size %d".formatted(offset, fileSize));
+                throw new ReadRequest.BeyondEnd(offset, fileSize);
             }
             long bytesRemaining = fileSize - offset;
             int headerSize = FormatInfo.getHeaderSize();
@@ -66,7 +66,7 @@ public class RecordReader {
             checksum.update(headerBuffer);
             checksum.update(dataBuffer);
             if (!isChecksumValid(storedChecksum, checksum)) {
-                throw new DataCorruptionException("Invalid checksum", offset);
+                throw new DataCorruptionException("Invalid checksum", offset, DataCorruptionException.Kind.CHECKSUM, null);
             }
 
             byte[] keyData = new byte[keyDataSize];
@@ -109,7 +109,7 @@ public class RecordReader {
         try {
             return FormatInfo.getPayloadSize(type, keyLength, valueLength, maxPayloadSize);
         } catch (FormatInfo.PayloadLimitExceededException e) {
-            throw e;
+            throw new RecordIOException.ReadLimitExceeded(offset, e);
         } catch (IllegalArgumentException e) {
             throw new DataCorruptionException(e.getMessage(), offset, e);
         }

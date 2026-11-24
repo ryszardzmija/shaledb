@@ -69,7 +69,7 @@ sequenceDiagram
     E-->>C: Return on normal completion
 ```
 
-Both mutations append even when the logical state already matches the request. The order of append, force and publication is explicit. The size check and possible index rebuild during rollover are also on the caller's path. A handled rollover failure becomes a warning. Other exceptions can still reach the caller after publication. [Storage semantics](storage-semantics.md) · [Durability and recovery](durability-and-recovery.md)
+Both mutations append even when the logical state already matches the request. The order of append, force and publication is explicit. The size check and possible index rebuild during rollover are also on the caller's path. A failure there reaches the caller with the triggering mutation's force already completed. [Storage semantics](storage-semantics.md) · [Durability and recovery](durability-and-recovery.md)
 
 ## Get
 

@@ -2,6 +2,7 @@ package com.ryszardzmija.shaledb.storage.hash.segment.model;
 
 import com.ryszardzmija.shaledb.storage.serialization.io.ReadRequest;
 import com.ryszardzmija.shaledb.storage.serialization.io.ReadResult;
+import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordReader;
 import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
 import com.ryszardzmija.shaledb.storage.hash.index.Index;
@@ -37,11 +38,17 @@ public class SegmentReader {
             return new LookupResult.NotPresent();
         }
 
-        if (offset.get() < 0 || offset.get() >= maxSegmentSize) {
-            throw new IllegalStateException("Invalid record offset retrieved from the index: " + offset.get());
+        long recordOffset = offset.get();
+        if (recordOffset < 0 || recordOffset >= maxSegmentSize) {
+            throw new RecordIOException.InvalidLocation(
+                    "Indexed offset outside [0, %d)".formatted(maxSegmentSize), recordOffset, null);
         }
 
-        ReadResult readResult = recordReader.read(new ReadRequest(offset.get()));
-        return new LookupResult.Present(readResult.recordPayload().value());
+        try {
+            ReadResult readResult = recordReader.read(new ReadRequest(recordOffset));
+            return new LookupResult.Present(readResult.recordPayload().value());
+        } catch (ReadRequest.BeyondEnd e) {
+            throw new RecordIOException.InvalidLocation("Indexed offset is beyond EOF", recordOffset, e);
+        }
     }
 }

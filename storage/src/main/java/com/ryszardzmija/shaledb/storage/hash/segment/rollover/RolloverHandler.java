@@ -9,17 +9,14 @@ import com.ryszardzmija.shaledb.storage.hash.segment.model.ImmutableSegment;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.MutableSegment;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentConfig;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentIOException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
 
 public class RolloverHandler {
-    private static final Logger logger = LoggerFactory.getLogger(RolloverHandler.class);
-
     private final SegmentFileFactory segmentFileFactory;
     private final FileSystemSync fileSystemSync;
     private final SegmentConfig segmentConfig;
@@ -38,14 +35,15 @@ public class RolloverHandler {
             newSegmentPath = segmentFileFactory.createSegmentFile();
             MutableSegment newMutableSegment = new MutableSegment(newSegmentPath, segmentConfig, durabilityConfig);
 
-            ImmutableSegment newImmutableSegment;
+            ImmutableSegment newImmutableSegment = null;
             try {
                 segment.sync();
                 newImmutableSegment = new ImmutableSegment(segment.path(), segmentConfig);
                 segment.close();
             } catch (SegmentIOException e) {
-                newMutableSegment.close();
-                throw e;
+                try (newMutableSegment; ImmutableSegment discard = newImmutableSegment) {
+                    throw e;
+                }
             }
 
             return new RolloverResult(newMutableSegment, newImmutableSegment);
@@ -54,10 +52,8 @@ public class RolloverHandler {
                 try {
                     Files.delete(newSegmentPath);
                     fileSystemSync.forceDirectory(segmentFileFactory.getSegmentDir());
-                } catch (IOException de) {
-                    logger.warn("Failed to delete orphaned segment file: {}", newSegmentPath, de);
-                } catch (DurabilityException de) {
-                    logger.warn("Failed to persist orphaned file deletion to storage: {}", segmentFileFactory.getSegmentDir(), de);
+                } catch (IOException | UncheckedIOException | DurabilityException cleanupFailure) {
+                    e.addSuppressed(cleanupFailure);
                 }
             }
             throw new RolloverException("Failed to roll over the segment " + segment.path(), e);

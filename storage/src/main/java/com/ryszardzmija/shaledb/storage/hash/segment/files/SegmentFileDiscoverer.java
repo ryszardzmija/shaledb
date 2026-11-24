@@ -1,6 +1,7 @@
 package com.ryszardzmija.shaledb.storage.hash.segment.files;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -12,9 +13,7 @@ public class SegmentFileDiscoverer {
 
     public SegmentFileDiscoverer(Path segmentDir) {
         this.segmentDir = Objects.requireNonNull(segmentDir);
-        if (!Files.isDirectory(this.segmentDir)) {
-            throw new SegmentFileException(segmentDir + " is not a directory, expected a directory with segment files");
-        }
+        SegmentFileFactory.requireDirectory(this.segmentDir);
     }
 
     /**
@@ -51,7 +50,7 @@ public class SegmentFileDiscoverer {
                     .filter(p -> p.getFileName().toString().matches(FileFormatInfo.getReadFileRegex()))
                     .sorted(Comparator.comparingLong(FileFormatInfo::extractId))
                     .collect(Collectors.toCollection(ArrayList::new));
-        } catch (IOException e) {
+        } catch (IOException | UncheckedIOException e) {
             throw new SegmentFileDiscoveryException("Error discovering segment files in " + segmentDir, e);
         }
     }

@@ -44,11 +44,16 @@ public class RecordWriter {
         int encodedRecordSize = FormatInfo.getEncodedRecordSize(payloadSize);
         byte encodedType = RecordTypeCodec.encode(recordType);
 
+        long writeOffset;
         try {
-            long writeOffset = writeChannel.size();
-            if (encodedRecordSize > Long.MAX_VALUE - writeOffset) {
-                throw new RecordIOException("Record end exceeds the supported file offset range at offset " + writeOffset);
-            }
+            writeOffset = writeChannel.size();
+        } catch (IOException e) {
+            throw new RecordIOException("Error obtaining segment size for append", e);
+        }
+        if (encodedRecordSize > Long.MAX_VALUE - writeOffset) {
+            throw new RecordIOException.InvalidLocation("Record end exceeds the supported file offset range", writeOffset, null);
+        }
+        try {
             ByteBuffer buffer = ByteBuffer.allocate(encodedRecordSize).order(FormatInfo.BYTE_ORDER);
 
             ByteBuffer checksumHeaderFields = ByteBuffer.allocate(FormatInfo.getChecksumHeaderFieldsSize()).order(FormatInfo.BYTE_ORDER);
@@ -75,7 +80,7 @@ public class RecordWriter {
 
             return new WriteResult(writeOffset, encodedRecordSize);
         } catch (IOException e) {
-            throw new RecordIOException("Error writing record data", e);
+            throw new RecordIOException("Error writing record data at offset " + writeOffset, e);
         }
     }
 
