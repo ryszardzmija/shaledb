@@ -38,13 +38,16 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class DatabaseLockTest {
+    // Keep directories alive while fault-injection tests retain their file keys in the JVM registry.
     @TempDir
-    Path directory;
+    static Path testRoot;
+
+    private Path directory;
     private Path lockPath;
 
     @BeforeEach
     void locateLockPath() throws IOException {
-        directory = directory.toRealPath();
+        directory = Files.createTempDirectory(testRoot, "database-").toRealPath();
         lockPath = directory.resolve("LOCK");
     }
 

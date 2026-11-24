@@ -43,15 +43,18 @@ class KeyValueStoreIoFailureTest {
     private static final byte[] KEY = {1};
     private static final byte[] VALUE = {2};
 
+    // Keep directories alive while fault-injection tests retain their file keys in the JVM registry.
     @TempDir
-    Path directory;
+    static Path testRoot;
+
+    private Path directory;
 
     private final FileChannel reader = mock(FileChannel.class);
     private final FileChannel writer = mock(FileChannel.class);
 
     @BeforeEach
-    void useCanonicalDirectoryForChannelStubs() throws IOException {
-        directory = directory.toRealPath();
+    void createDatabaseDirectory() throws IOException {
+        directory = Files.createTempDirectory(testRoot, "database-").toRealPath();
     }
 
     @Test
