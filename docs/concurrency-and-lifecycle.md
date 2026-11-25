@@ -1,21 +1,10 @@
 # Concurrency and lifecycle
 
-An engine has exclusive ownership of one database directory. Calls on that engine, including reads and close, must also be serialized by its caller. The gRPC server supplies a single worker. An embedded caller must provide equivalent serialization. Index transitions update two collections, rollover transfers a live reader, and close releases channels. Directory locking alone cannot protect these operations from one another. [StorageEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/StorageEngine.java)
+An engine has exclusive ownership of one database directory. Calls on that engine, including reads and close, must also be serialized by its caller. The gRPC server supplies a single worker. An embedded caller must provide equivalent serialization. The mutable segment updates its local index after a durable append. Index transitions update two collections, rollover transfers the reader and local index, and close releases channels. Directory locking alone cannot protect these operations from one another. [StorageEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/StorageEngine.java)
 
 ## Acquiring ownership
 
-| State or resource | Actual owner and coordination |
-| --- | --- |
-| Database directory | A `DatabaseLock` manages a JVM-local reservation, one dedicated channel and an exclusive operating-system lock on `LOCK`. The engine holds it from before discovery through segment cleanup. |
-| Active reference, history list, factory counter | `HashIndexEngine` and its factory mutate ordinary fields and an `ArrayList`. Switching active and publishing the old immutable takes two updates. Concurrent reads can observe an inconsistent layout. |
-| Per-segment key state | Each segment owns its `HashIndex`. The mutable segment updates it after the append and force return, and both segment types consult their own index before reading a record. The index transitions rely on serialized access. Historical indexes receive only lookups after initialization or retirement. |
-| File position and record contents | `RecordWriter` queries the file size, positions the write channel at that offset and transfers the record. Two writers can observe the same size, and a sequence of short writes has no engine-level mutual exclusion. The value array is read twice during encoding. |
-| Segment read channels | A read uses positional I/O, so it need not change a shared cursor. That fact alone cannot protect an index lookup or pin the channel between lookup and use. A failed rollover or close can release the channel a reader would use. |
-| Server request execution | A single worker executes queued reads, mutations and response callbacks. The worker serializes those requests. Directory ownership applies separately at the storage boundary. [Server architecture](server-architecture.md) |
-
-## Directory identity and lock file
-
-The protected directory is `storage.segmentDir`. Open resolves it with `Path.toRealPath()` and uses its filesystem file key for the JVM reservation when supplied. Otherwise it uses the resolved path. The same resolved directory is used for segment I/O. Relative paths, existing `.` and `..` components and directory symlink aliases resolve through the filesystem. Case aliases are supported when the provider reports a common file key or canonical path. [DatabaseLock](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/DatabaseLock.java)
+The engine resolves the existing directory with `toRealPath()` and atomically reserves its identity in the JVM. The identity uses the filesystem and directory file key, falling back to the resolved path if the provider supplies no key. Relative paths and symlink aliases that resolve to the same directory share ownership. Cooperating engines use the same class loader so they share the registry.
 
 After reserving the directory, the engine opens the stable `LOCK` file on a dedicated channel and acquires an exclusive lock with nonblocking `tryLock()`. The reservation comes first because closing a second channel for the same file can release the JVM's existing native lock on some platforms. Contention in the registry or at the native lock reports `OPEN / DATABASE_LOCKED`.
 

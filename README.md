@@ -57,11 +57,11 @@ The `server` module contains the application entry point, configuration loading,
 
 Writes are append-only. A `put` writes a normal record, while a `delete` writes a tombstone record. ShaleDB checks whether each complete encoded record fits before appending it. If space is insufficient, it publishes a new mutable segment and keeps previous segments immutable.
 
-Each segment has an in-memory hash index that maps keys to offsets in the segment file. Reads check the mutable segment first, then immutable segments from newest to oldest, so the newest record for a key wins. This matters for deletes: a tombstone in a newer segment must shadow an older value.
+Each segment has an in-memory hash index that stores record offsets and deletion markers. Reads check the mutable segment first, then immutable segments from newest to oldest. A tombstone in a newer segment masks older values.
 
 Records include a CRC32C checksum, record type, key length, value length, key bytes, and value bytes. Reads, writes, and startup index rebuilds enforce the same record structure and payload limit. The engine rejects invalid mutations before append, and reads check for truncated records and checksum mismatches.
 
-The current durability mode is `SYNC_EACH_WRITE`. The segment writer returns the physical append result after flushing, and the mutable segment then updates its index. On startup, a validated record scanner feeds index reconstruction and identifies supported interrupted appends in the active segment. [Durability and recovery](docs/durability-and-recovery.md)
+The durability mode is `SYNC_EACH_WRITE`. The segment writer returns the physical append result after forcing the file, and the mutable segment then updates its index. On startup, a sequential scanner feeds validated records to index reconstruction and identifies eligible incomplete tails in the active segment. [Durability and recovery](docs/durability-and-recovery.md)
 
 ## Configuration
 
