@@ -1,5 +1,14 @@
 # ShaleDB
 
+<div align="center">
+  <img src="assets/logo.png" alt="ShaleDB Logo" width="300"/>
+  <p>
+    <a href="https://github.com/ryszardzmija/shaledb/actions/workflows/ci.yaml">
+      <img src="https://github.com/ryszardzmija/shaledb/actions/workflows/ci.yaml/badge.svg" alt="CI"/>
+    </a>
+  </p>
+</div>
+
 ShaleDB is an embedded, persistent key-value storage engine. It stores binary keys and values on local disk and supports reads, writes, and deletes on individual keys. The project prioritizes correctness and durability, with a simple architecture that makes it easier to reason about what happens when a write succeeds or is interrupted.
 
 The engine draws on Bitcask's append-only storage model. Segment files hold the history of writes and deletes. A global in-memory key directory points to the latest record for each live key, so the engine can read it directly.
