@@ -93,6 +93,14 @@ class KeyValueStoreFailStopTest {
     }
 
     @Test
+    void immediateTombstoneAppendFailureKeepsThePreviousValueOnReopen() throws IOException {
+        assertAppendFailure(Operation.DELETE, TOMBSTONE, 0);
+        try (KeyValueStore reopened = open()) {
+            assertValue(reopened, KEY, VALUE);
+        }
+    }
+
+    @Test
     void partialHeaderAppendLeavesAnExactUnmodifiedSuffixAfterClose() throws IOException {
         assertAppendFailure(Operation.PUT, OVERWRITE, 3);
         assertActiveRecoveryKeepsOriginalValue();
