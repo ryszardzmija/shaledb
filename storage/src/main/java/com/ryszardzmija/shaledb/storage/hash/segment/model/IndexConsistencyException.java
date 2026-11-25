@@ -2,11 +2,11 @@ package com.ryszardzmija.shaledb.storage.hash.segment.model;
 
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
 
-/** An offset expected to hold a normal record resolves to a valid record with an unexpected type or key. */
+/** A directory location cannot be resolved to the expected normal record. */
 public final class IndexConsistencyException extends RecordIOException {
     private final long recordOffset;
 
-    IndexConsistencyException(long recordOffset, String detail) {
+    public IndexConsistencyException(long recordOffset, String detail) {
         super("Invalid index reference at offset %d: %s".formatted(recordOffset, detail), null);
         this.recordOffset = recordOffset;
     }

@@ -39,9 +39,11 @@ public class SegmentFileFactory {
      * An allocated ID is consumed even if creation fails.
      * @throws SegmentFileException if there is no successor ID or creation fails
      */
-    public Path createSegmentFile() {
+    public SegmentFile createSegmentFile() {
         requireSuccessorId();
-        Path segmentPath = segmentDir.resolve(FileFormatInfo.filename(++lastId));
+        long id = ++lastId;
+        Path segmentPath = segmentDir.resolve(FileFormatInfo.filename(id));
+        SegmentFile segmentFile = new SegmentFile(id, segmentPath);
 
         FileChannel channel;
         try {
@@ -78,7 +80,7 @@ public class SegmentFileFactory {
             }
             throw (Error) e;
         }
-        return segmentPath;
+        return segmentFile;
     }
 
     /** Checks ID availability without consuming an ID or changing the file set. */

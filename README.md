@@ -11,7 +11,7 @@
 
 ## Overview
 
-ShaleDB is a persistent key-value store written in Java. It implements a local storage engine with append-only segment files, in-memory hash indexes, CRC32C-validated records, tombstone deletes, size-based segment rollover, startup index rebuilds, conservative startup recovery, and validated YAML configuration. The store is also available through a small gRPC API for `Get`, `Put`, and `Delete`.
+ShaleDB is a persistent key-value store written in Java. It implements a local storage engine with append-only segment files, a global in-memory key directory, CRC32C-validated records, tombstone deletes, size-based segment rollover, chronological startup replay, conservative startup recovery, and validated YAML configuration. The store is also available through a small gRPC API for `Get`, `Put`, and `Delete`.
 
 For the storage contract, binary format, recovery policy and developer testing guide, see the [architecture guide](docs/README.md).
 
@@ -57,11 +57,11 @@ The `server` module contains the application entry point, configuration loading,
 
 Writes are append-only. A `put` writes a normal record, while a `delete` writes a tombstone record. ShaleDB checks whether each complete encoded record fits before appending it. If space is insufficient, it publishes a new mutable segment and keeps previous segments immutable.
 
-Each segment has an in-memory hash index that stores record offsets and deletion markers. Reads check the mutable segment first, then immutable segments from newest to oldest. A tombstone in a newer segment masks older values.
+The global key directory maps each live key to its latest record's segment ID and byte offset. A hit goes directly to that record, and a miss requires no file access. Each delete appends a persistent tombstone and removes the key from the directory.
 
-Records include a CRC32C checksum, record type, key length, value length, key bytes, and value bytes. Reads, writes, and startup index rebuilds enforce the same record structure and payload limit. The engine rejects invalid mutations before append, and reads check for truncated records and checksum mismatches.
+Records include a CRC32C checksum, record type, key length, value length, key bytes, and value bytes. Reads, writes, and chronological startup replay enforce the same record structure and payload limit. The engine rejects invalid mutations before append, and reads check for truncated records and checksum mismatches.
 
-The durability mode is `SYNC_EACH_WRITE`. The segment writer returns the physical append result after forcing the file, and the mutable segment then updates its index. On startup, a sequential scanner feeds validated records to index reconstruction and identifies eligible incomplete tails in the active segment. [Durability and recovery](docs/durability-and-recovery.md)
+The durability mode is `SYNC_EACH_WRITE`. The segment writer returns the physical append result after forcing the file, and the engine then updates the key directory. On startup, a sequential scanner supplies validated records for replay and identifies eligible incomplete tails in the active segment. [Durability and recovery](docs/durability-and-recovery.md)
 
 ## Configuration
 
@@ -69,4 +69,4 @@ Runtime storage settings live in `config/application.yaml`. The configuration co
 
 ## Current limitations
 
-The current implementation should be treated as single-threaded. The gRPC service serializes storage operations through a single executor, and the storage engine does not support compaction, transactions, snapshots, or range scans. Startup rebuilds indexes by scanning segment files, so startup time grows with the amount of data on disk.
+The current implementation should be treated as single-threaded. The gRPC service serializes storage operations through a single executor, and the storage engine does not support compaction, transactions, snapshots, or range scans. Startup rebuilds the key directory by scanning segment files in numeric ID order, so startup time grows with the amount of data on disk.

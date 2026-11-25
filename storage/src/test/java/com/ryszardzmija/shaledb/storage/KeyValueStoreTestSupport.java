@@ -10,12 +10,14 @@ import org.mockito.MockedStatic;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HexFormat;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.zip.CRC32C;
 
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 import static java.nio.file.StandardOpenOption.CREATE;
@@ -84,6 +86,15 @@ final class KeyValueStoreTestSupport {
         channels.when(() -> FileChannel.open(directory, READ)).thenAnswer(call -> directoryChannel != null
                 ? directoryChannel : directory.getFileSystem().provider().newFileChannel(directory, Set.of(READ)));
         return channels;
+    }
+
+    /** Fixture encoder independent of the production record writer and its format constants. */
+    static byte[] encodeRecord(int type, byte[] key, byte[] value) {
+        ByteBuffer bytes = ByteBuffer.allocate(13 + key.length + value.length).order(ByteOrder.LITTLE_ENDIAN);
+        bytes.putInt(0).put((byte) type).putInt(key.length).putInt(value.length).put(key).put(value);
+        var checksum = new CRC32C();
+        checksum.update(bytes.array(), 4, bytes.capacity() - 4);
+        return bytes.putInt(0, (int) checksum.getValue()).array();
     }
 
     static byte[] invalidHeader() {

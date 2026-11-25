@@ -144,15 +144,15 @@ class KeyValueStoreIoFailureTest {
     }
 
     @Test
-    void failedSuccessorIndexBuildKeepsThePrimaryFailureAndThePublishedEmptyFile() throws IOException {
+    void failedSuccessorEmptyCheckKeepsThePrimaryFailureAndThePublishedEmptyFile() throws IOException {
         Path active = createSegment(1);
         Path replacement = directory.resolve("segment_0000000000000000002.log");
         FileChannel replacementReader = mock(FileChannel.class);
         FileChannel replacementWriter = mock(FileChannel.class);
-        IOException indexFailure = new IOException("failed to size successor during index build");
+        IOException initializationFailure = new IOException("failed to check successor extent");
         IOException closeFailure = new IOException("failed replacement read close");
         IOException historyCloseFailure = new IOException("failed historical read close");
-        when(replacementReader.size()).thenThrow(indexFailure);
+        when(replacementReader.size()).thenThrow(initializationFailure);
         doThrow(closeFailure).when(replacementReader).close();
         doThrow(historyCloseFailure).when(reader).close();
         try (MockedStatic<FileChannel> channels = mockChannels()) {
@@ -166,7 +166,7 @@ class KeyValueStoreIoFailureTest {
 
                 StorageEngineException failure = assertFailure(() -> store.put(KEY, VALUE),
                         Operation.PUT, Reason.STORAGE_IO, MutationOutcome.NOT_APPENDED);
-                assertThat(failure).hasRootCause(indexFailure);
+                assertThat(failure).hasRootCause(initializationFailure);
                 Throwable segmentFailure = failure.getCause().getCause();
                 assertThat(segmentFailure.getCause().getSuppressed()).containsExactly(closeFailure);
                 assertThat(segmentFailure.getSuppressed()).singleElement().satisfies(e -> assertThat(e).hasCause(historyCloseFailure));
@@ -333,15 +333,15 @@ class KeyValueStoreIoFailureTest {
 
     @Test
     void corruptHistoricalSegmentClosesAllRealChannelsOpenedBeforeIt() throws IOException {
-        Path corrupt = createSegment(1);
+        Path older = createSegment(1);
+        Path newer = createSegment(2);
+        Path corrupt = createSegment(3);
         byte[] invalid = invalidHeader();
         Files.write(corrupt, invalid);
-        Path older = createSegment(2);
-        Path newer = createSegment(3);
         Path active = createSegment(4);
         List<FileChannel> opened = new ArrayList<>();
         try (MockedStatic<FileChannel> channels = mockChannels()) {
-            for (Path historical : List.of(newer, older, corrupt)) {
+            for (Path historical : List.of(older, newer, corrupt)) {
                 channels.when(() -> FileChannel.open(historical, READ)).thenAnswer(call -> {
                     FileChannel channel = historical.getFileSystem().provider().newFileChannel(historical, Set.of(READ));
                     opened.add(channel);

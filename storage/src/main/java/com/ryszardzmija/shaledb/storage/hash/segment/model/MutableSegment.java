@@ -3,9 +3,8 @@ package com.ryszardzmija.shaledb.storage.hash.segment.model;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityConfig;
 import com.ryszardzmija.shaledb.storage.durability.FileSystemSync;
 import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
-import com.ryszardzmija.shaledb.storage.hash.index.Index;
-import com.ryszardzmija.shaledb.storage.hash.index.IndexBuildException;
-import com.ryszardzmija.shaledb.storage.hash.index.IndexBuilder;
+import com.ryszardzmija.shaledb.storage.hash.segment.files.SegmentFile;
+import com.ryszardzmija.shaledb.storage.serialization.io.ReadResult;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordReader;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordWriter;
@@ -17,45 +16,57 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Objects;
+import java.util.function.ObjLongConsumer;
 
 public class MutableSegment implements AutoCloseable {
-    private final Path path;
+    private final SegmentFile file;
     private final FileChannel readChannel;
     private final FileChannel writeChannel;
-    private final Index index;
     private final SegmentReader segmentReader;
     private final SegmentWriter segmentWriter;
     private final SegmentChannelCleanup channelCleanup;
     private boolean writeCloseStarted;
     private boolean closeStarted;
 
-    public MutableSegment(Path path, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig) {
-        this(path, segmentConfig, durabilityConfig, new SegmentChannelCleanup());
-    }
-
-    public MutableSegment(Path path, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig,
+    public MutableSegment(SegmentFile file, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig,
                           SegmentChannelCleanup channelCleanup) {
-        this(path, segmentConfig, durabilityConfig, channelCleanup, false);
+        this(file, segmentConfig, durabilityConfig, channelCleanup, null);
     }
 
     /** Reopens the discovered active segment after the loader has validated historical segments. */
-    public static MutableSegment reopen(Path path, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig,
-                                        SegmentChannelCleanup channelCleanup) {
-        return new MutableSegment(path, segmentConfig, durabilityConfig, channelCleanup, true);
+    public static MutableSegment reopen(SegmentFile file, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig,
+                                        SegmentChannelCleanup channelCleanup, ObjLongConsumer<ReadResult> replayRecord) {
+        return new MutableSegment(file, segmentConfig, durabilityConfig, channelCleanup,
+                Objects.requireNonNull(replayRecord));
     }
 
-    private MutableSegment(Path path, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig,
-                           SegmentChannelCleanup channelCleanup, boolean reopening) {
-        this.path = Objects.requireNonNull(path);
+    private MutableSegment(SegmentFile file, SegmentConfig segmentConfig, DurabilityConfig durabilityConfig,
+                           SegmentChannelCleanup channelCleanup, ObjLongConsumer<ReadResult> replayRecord) {
+        this.file = Objects.requireNonNull(file);
         this.channelCleanup = Objects.requireNonNull(channelCleanup);
+        Path path = file.path();
 
         FileChannel openedReadChannel = null;
         FileChannel openedWriteChannel = null;
         try {
             openedReadChannel = FileChannel.open(path, StandardOpenOption.READ);
             openedWriteChannel = FileChannel.open(path, StandardOpenOption.WRITE);
-            IndexBuilder indexBuilder = new IndexBuilder(openedReadChannel, segmentConfig.maxPayloadSize());
-            this.index = reopening ? recoverIndex(indexBuilder, openedWriteChannel) : indexBuilder.build();
+            if (replayRecord == null && openedReadChannel.size() != 0) {
+                throw new IOException("New segment is not empty");
+            }
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
+            channelCleanup.closeAfterFailure(path, e, openedReadChannel, openedWriteChannel);
+            throw new SegmentIOException("Failed to initialize the segment file " + path, e);
+        } catch (RuntimeException | Error e) {
+            channelCleanup.closeAfterFailure(path, e, openedReadChannel, openedWriteChannel);
+            throw e;
+        }
+
+        try {
+            if (replayRecord != null) {
+                SegmentScanner scanner = new SegmentScanner(openedReadChannel, segmentConfig.maxPayloadSize());
+                recoverTail(scanner.scan(replayRecord), openedWriteChannel);
+            }
 
             this.readChannel = openedReadChannel;
             this.writeChannel = openedWriteChannel;
@@ -64,26 +75,17 @@ public class MutableSegment implements AutoCloseable {
             RecordWriter recordWriter = new RecordWriter(writeChannel, new FileSystemSync(),
                     segmentConfig.maxPayloadSize());
             this.segmentWriter = new SegmentWriter(recordWriter, durabilityConfig.durabilityMode());
-        } catch (IOException | RuntimeException | Error e) {
+        } catch (RuntimeException | Error e) {
             channelCleanup.closeAfterFailure(path, e, openedReadChannel, openedWriteChannel);
 
-            if (e instanceof IndexBuildException ie) {
-                throw new SegmentIOException("Failed to create index for segment file " + path, ie);
+            if (e instanceof SegmentScanner.ScanException scanFailure) {
+                throw new SegmentIOException("Failed to replay active segment " + path, scanFailure);
             }
-
-            if (e instanceof IOException || e instanceof UnsupportedOperationException || e instanceof SecurityException) {
-                throw new SegmentIOException("Failed to open the segment file " + path, e);
-            }
-            if (e instanceof RuntimeException unexpected) {
-                throw unexpected;
-            }
-            throw (Error) e;
+            throw e;
         }
     }
 
-    private Index recoverIndex(IndexBuilder indexBuilder, FileChannel writer) {
-        IndexBuilder.ReplayResult replay = indexBuilder.replay();
-        SegmentScanner.ScanResult scan = replay.scan();
+    private void recoverTail(SegmentScanner.ScanResult scan, FileChannel writer) {
         long boundary = scan.validSize();
         String operation = "verify the scanned extent of";
         try {
@@ -102,30 +104,31 @@ public class MutableSegment implements AutoCloseable {
             }
         } catch (IOException | UnsupportedOperationException | SecurityException e) {
             throw new SegmentIOException("Failed to %s active segment %s at validated boundary %d"
-                    .formatted(operation, path, boundary), e);
-        }
-        return replay.index();
-    }
-
-    public LookupResult get(ByteKey key) {
-        return SegmentLookup.get(path, index, segmentReader, key);
-    }
-
-    public void put(ByteKey key, byte[] value) {
-        try {
-            WriteResult appended = segmentWriter.appendValue(key.getData(), value);
-            index.markPresent(key, appended.writeOffset());
-        } catch (RecordIOException e) {
-            throw new SegmentIOException("Failed to write to segment " + path, e);
+                    .formatted(operation, path(), boundary), e);
         }
     }
 
-    public void delete(ByteKey key) {
+    public byte[] readValue(long offset, ByteKey expectedKey) {
         try {
-            segmentWriter.appendTombstone(key.getData());
-            index.markDeleted(key);
+            return segmentReader.readValue(offset, expectedKey);
         } catch (RecordIOException e) {
-            throw new SegmentIOException("Failed to write to segment " + path, e);
+            throw new SegmentIOException("Failed to read from segment " + path(), e);
+        }
+    }
+
+    public WriteResult appendValue(byte[] key, byte[] value) {
+        try {
+            return segmentWriter.appendValue(key, value);
+        } catch (RecordIOException e) {
+            throw new SegmentIOException("Failed to write to segment " + path(), e);
+        }
+    }
+
+    public WriteResult appendTombstone(byte[] key) {
+        try {
+            return segmentWriter.appendTombstone(key);
+        } catch (RecordIOException e) {
+            throw new SegmentIOException("Failed to write to segment " + path(), e);
         }
     }
 
@@ -133,34 +136,38 @@ public class MutableSegment implements AutoCloseable {
         try {
             return readChannel.size();
         } catch (IOException e) {
-            throw new SegmentIOException("Failed to get size of segment " + path, e);
+            throw new SegmentIOException("Failed to get size of segment " + path(), e);
         }
     }
 
+    public long id() {
+        return file.id();
+    }
+
     public Path path() {
-        return path;
+        return file.path();
     }
 
     public void sync() {
         try {
             segmentWriter.sync();
         } catch (RecordIOException e) {
-            throw new SegmentIOException("Failed to flush segment " + path + " to durable storage", e);
+            throw new SegmentIOException("Failed to flush segment " + path() + " to durable storage", e);
         }
     }
 
-    /** Retires the writer and transfers the reader, its channel and the live index to a historical view. */
+    /** Retires the writer and transfers the reader and its channel, preserving the file identity. */
     public ImmutableSegment retire() {
         if (closeStarted || writeCloseStarted) {
-            throw new IllegalStateException("Segment writer has already been retired: " + path);
+            throw new IllegalStateException("Segment writer has already been retired: " + path());
         }
         writeCloseStarted = true;
         try {
-            channelCleanup.close(path, writeChannel);
+            channelCleanup.close(path(), writeChannel);
         } catch (IOException e) {
-            throw new SegmentIOException("Failed to retire the writer for segment " + path, e);
+            throw new SegmentIOException("Failed to retire the writer for segment " + path(), e);
         }
-        ImmutableSegment historical = new ImmutableSegment(path, readChannel, segmentReader, index, channelCleanup);
+        ImmutableSegment historical = new ImmutableSegment(file, readChannel, segmentReader, channelCleanup);
         closeStarted = true; // The historical view now owns the read channel.
         return historical;
     }
@@ -172,9 +179,9 @@ public class MutableSegment implements AutoCloseable {
         }
         closeStarted = true;
         try {
-            channelCleanup.close(path, readChannel, writeCloseStarted ? null : writeChannel);
+            channelCleanup.close(path(), readChannel, writeCloseStarted ? null : writeChannel);
         } catch (IOException e) {
-            throw new SegmentIOException("Failed to close segment " + path, e);
+            throw new SegmentIOException("Failed to close segment " + path(), e);
         }
     }
 

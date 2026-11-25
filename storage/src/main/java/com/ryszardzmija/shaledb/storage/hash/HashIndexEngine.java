@@ -10,8 +10,9 @@ import com.ryszardzmija.shaledb.storage.durability.DurabilityConfig;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityException;
 import com.ryszardzmija.shaledb.storage.durability.FileSystemSync;
 import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
+import com.ryszardzmija.shaledb.storage.hash.index.KeyDirectory;
+import com.ryszardzmija.shaledb.storage.hash.index.RecordLocation;
 import com.ryszardzmija.shaledb.storage.hash.segment.files.*;
-import com.ryszardzmija.shaledb.storage.hash.segment.loader.LoadedSegments;
 import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoader;
 import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoadingException;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.*;
@@ -20,11 +21,14 @@ import com.ryszardzmija.shaledb.storage.serialization.io.DataCorruptionException
 import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException;
 import com.ryszardzmija.shaledb.storage.serialization.io.ReadRequest;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
+import com.ryszardzmija.shaledb.storage.serialization.io.WriteResult;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
 import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo;
 
 import java.nio.file.Path;
 import java.util.*;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 public class HashIndexEngine implements StorageEngine {
     private enum State { OPENING, OPEN, FAILED, CLOSED }
@@ -35,7 +39,8 @@ public class HashIndexEngine implements StorageEngine {
     private final RolloverHandler rolloverHandler;
     private final long maxPayloadSize;
 
-    private final ArrayList<ImmutableSegment> immutableSegments;
+    private final Map<Long, ImmutableSegment> immutableSegments;
+    private KeyDirectory keyDirectory;
     private MutableSegment mutableSegment;
     private State state = State.OPENING;
     private Throwable failureCause;
@@ -61,12 +66,17 @@ public class HashIndexEngine implements StorageEngine {
             SegmentLoader segmentLoader = new SegmentLoader(segmentConfig, durabilityConfig, channelCleanup,
                     fileSystemSync);
 
+            KeyDirectory directory = new KeyDirectory();
+            // The insertion-order chain keeps cleanup independent of the hash buckets.
+            Map<Long, ImmutableSegment> registry = LinkedHashMap.newLinkedHashMap(discovered.size());
             SegmentLayout segmentLayout = latest == null
                     ? new SegmentLayout(List.of(), segmentFileFactory.createSegmentFile())
-                    : new SegmentLayout(List.copyOf(discovered.headMap(latest.getKey(), false).values()), latest.getValue());
-            LoadedSegments loadedSegments = segmentLoader.loadSegments(segmentLayout, latest != null);
-            this.immutableSegments = loadedSegments.immutableSegments();
-            this.mutableSegment = loadedSegments.mutableSegment();
+                    : new SegmentLayout(discovered.headMap(latest.getKey(), false).entrySet().stream()
+                            .map(entry -> new SegmentFile(entry.getKey(), entry.getValue())).toList(),
+                            new SegmentFile(latest.getKey(), latest.getValue()));
+            this.mutableSegment = segmentLoader.loadSegments(segmentLayout, latest != null, directory, registry);
+            this.immutableSegments = registry;
+            this.keyDirectory = directory;
             this.state = State.OPEN;
         } catch (RuntimeException | Error e) {
             if (!channelCleanup.hasPendingChannels()) {
@@ -90,7 +100,10 @@ public class HashIndexEngine implements StorageEngine {
         }
         int payloadSize = FormatInfo.getPayloadSize(RecordType.NORMAL, key.length, value.length, maxPayloadSize);
         ByteKey byteKey = new ByteKey(key);
-        mutate(Operation.PUT, FormatInfo.getEncodedRecordSize(payloadSize), () -> mutableSegment.put(byteKey, value));
+        mutate(Operation.PUT, FormatInfo.getEncodedRecordSize(payloadSize),
+                () -> mutableSegment.appendValue(byteKey.getData(), value),
+                appended -> keyDirectory.markPresent(byteKey,
+                        new RecordLocation(mutableSegment.id(), appended.writeOffset())));
     }
 
     @Override
@@ -100,24 +113,21 @@ public class HashIndexEngine implements StorageEngine {
         ByteKey byteKey = new ByteKey(key);
 
         try {
-            LookupResult mutableResult = mutableSegment.get(byteKey);
-            switch (mutableResult) {
-                case LookupResult.Deleted _ -> { return Optional.empty(); }
-                case LookupResult.Present mappedValue -> { return Optional.of(mappedValue.value()); }
-                case LookupResult.NotPresent _ -> {  /* continue */ }
+            Optional<RecordLocation> found = keyDirectory.lookup(byteKey);
+            if (found.isEmpty()) {
+                return Optional.empty();
             }
-
-            for (ImmutableSegment segment : immutableSegments) {
-                LookupResult immutableResult = segment.get(byteKey);
-                switch (immutableResult) {
-                    case LookupResult.Deleted _ -> { return Optional.empty(); }
-                    case LookupResult.Present mappedValue -> { return Optional.of(mappedValue.value()); }
-                    case LookupResult.NotPresent _ -> {  /* continue */ }
-                }
+            RecordLocation location = found.get();
+            if (location.segmentId() == mutableSegment.id()) {
+                return Optional.of(mutableSegment.readValue(location.recordOffset(), byteKey));
             }
-
-            return Optional.empty();
-        } catch (SegmentIOException e) {
+            ImmutableSegment historical = immutableSegments.get(location.segmentId());
+            if (historical == null) {
+                throw new IndexConsistencyException(location.recordOffset(),
+                        "Unknown segment ID " + location.segmentId());
+            }
+            return Optional.of(historical.readValue(location.recordOffset(), byteKey));
+        } catch (SegmentIOException | IndexConsistencyException e) {
             throw terminalFailure(Operation.GET, MutationOutcome.NOT_APPLICABLE, "Failed to read indexed record", e);
         } catch (RuntimeException | Error e) {
             markFailed(e);
@@ -142,13 +152,16 @@ public class HashIndexEngine implements StorageEngine {
         validateKey(key);
         int payloadSize = FormatInfo.getPayloadSize(RecordType.TOMBSTONE, key.length, 0, maxPayloadSize);
         ByteKey byteKey = new ByteKey(key);
-        mutate(Operation.DELETE, FormatInfo.getEncodedRecordSize(payloadSize), () -> mutableSegment.delete(byteKey));
+        mutate(Operation.DELETE, FormatInfo.getEncodedRecordSize(payloadSize),
+                () -> mutableSegment.appendTombstone(byteKey.getData()),
+                appended -> keyDirectory.remove(byteKey));
     }
 
     @Override
     public void close() {
         State previousState = state;
         state = State.CLOSED;
+        keyDirectory = null;
 
         Throwable primaryFailure = null;
         if (previousState == State.OPEN) {
@@ -166,7 +179,7 @@ public class HashIndexEngine implements StorageEngine {
                 primaryFailure = SegmentChannelCleanup.suppress(primaryFailure, e);
             }
             mutableSegment = null;
-            for (ImmutableSegment segment : immutableSegments) {
+            for (ImmutableSegment segment : immutableSegments.values()) {
                 try {
                     segment.close();
                 } catch (RuntimeException | Error e) {
@@ -194,21 +207,27 @@ public class HashIndexEngine implements StorageEngine {
         }
     }
 
-    private void mutate(Operation operation, int recordSize, Runnable appendAndPublish) {
+    private void mutate(Operation operation, int recordSize, Supplier<WriteResult> append, Consumer<WriteResult> publish) {
         // StorageConfig guarantees that every admitted record fits in an empty segment.
         MutationOutcome outcome = MutationOutcome.NOT_APPENDED;
         try {
             handleRollover(recordSize);
             outcome = MutationOutcome.UNKNOWN;
-            appendAndPublish.run();
-        } catch (SegmentFileException.IdExhausted e) {
-            // The handler reports exhaustion before retiring the current writer.
-            throw failure(operation, MutationOutcome.NOT_APPENDED, "No successor segment ID available", e);
-        } catch (SegmentIOException | RolloverException e) {
-            String message = outcome == MutationOutcome.NOT_APPENDED
-                    ? "Failed to prepare the destination segment" : "Failed to append or force mutation";
-            throw terminalFailure(operation, outcome, message, e);
+            WriteResult appended = append.get();
+            outcome = MutationOutcome.FORCE_COMPLETED;
+            publish.accept(appended);
         } catch (RuntimeException | Error e) {
+            if (outcome == MutationOutcome.NOT_APPENDED && e instanceof SegmentFileException.IdExhausted exhausted) {
+                // The handler reports exhaustion before retiring the current writer.
+                throw failure(operation, outcome, "No successor segment ID available", exhausted);
+            }
+            if (outcome != MutationOutcome.FORCE_COMPLETED && e instanceof RuntimeException operational
+                    && (e instanceof SegmentIOException || e instanceof RolloverException)) {
+                String message = outcome == MutationOutcome.NOT_APPENDED
+                        ? "Failed to prepare the destination segment" : "Failed to append or force mutation";
+                throw terminalFailure(operation, outcome, message, operational);
+            }
+            // Publication only changes memory and has no expected operational failures.
             markFailed(e);
             throw e;
         }
@@ -218,16 +237,16 @@ public class HashIndexEngine implements StorageEngine {
         if (!rolloverPolicy.shouldRollover(mutableSegment.size(), recordSize)) {
             return;
         }
-        // Reserve room before the handler can retire the active segment.
-        immutableSegments.ensureCapacity(immutableSegments.size() + 1);
         RolloverResult replacement = rolloverHandler.rollOver(mutableSegment);
-        MutableSegment successor = replacement.newMutableSegment();
+        mutableSegment = replacement.newMutableSegment(); // Keep the successor reachable for close.
         ImmutableSegment historical = replacement.newImmutableSegment();
         try {
-            immutableSegments.addFirst(historical);
+            long id = historical.id();
+            if (immutableSegments.putIfAbsent(id, historical) != null) {
+                throw new IllegalStateException("Duplicate historical segment ID " + id);
+            }
         } catch (RuntimeException | Error e) {
-            // Keep the successor reachable for close. The history list may never have taken ownership.
-            mutableSegment = successor;
+            // Close even if insertion linked the segment before failing. Segment close is idempotent.
             try {
                 historical.close();
             } catch (RuntimeException | Error closeFailure) {
@@ -235,7 +254,6 @@ public class HashIndexEngine implements StorageEngine {
             }
             throw e;
         }
-        mutableSegment = successor;
     }
 
     private StorageEngineException terminalFailure(

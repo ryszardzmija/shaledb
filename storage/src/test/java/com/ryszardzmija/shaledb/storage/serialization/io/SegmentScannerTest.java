@@ -10,6 +10,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -22,8 +23,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class SegmentScannerTest {
     private static final long MAX_PAYLOAD = 64;
@@ -187,6 +191,36 @@ class SegmentScannerTest {
                 throw injected;
             })).isSameAs(injected);
         }
+    }
+
+    @Test
+    void ioFailureAfterAValidPrefixAbortsReplayAndPreservesTheCause() throws IOException {
+        Path path = directory.resolve("segment.log");
+        long secondOffset;
+        try (FileChannel channel = FileChannel.open(path, CREATE_NEW, WRITE)) {
+            appendValue(channel);
+            secondOffset = channel.size();
+            appendValue(channel);
+        }
+
+        byte[] history = Files.readAllBytes(path);
+        IOException readFailure = new IOException("Injected positional read failure");
+        try (FileChannel channel = FileChannel.open(path, READ)) {
+            FileChannel failingChannel = mock(FileChannel.class);
+            when(failingChannel.size()).thenReturn(channel.size());
+            when(failingChannel.read(any(ByteBuffer.class), anyLong())).thenAnswer(call ->
+                    channel.read(call.getArgument(0), call.<Long>getArgument(1)));
+            doThrow(readFailure).when(failingChannel).read(any(ByteBuffer.class), eq(secondOffset));
+
+            List<Long> offsets = new ArrayList<>();
+            assertThatThrownBy(() -> new SegmentScanner(failingChannel, MAX_PAYLOAD)
+                    .scanComplete((record, offset) -> offsets.add(offset)))
+                    .isInstanceOf(SegmentScanner.ScanException.class)
+                    .hasCauseInstanceOf(RecordIOException.class)
+                    .hasRootCause(readFailure);
+            assertThat(offsets).containsExactly(0L);
+        }
+        assertThat(Files.readAllBytes(path)).containsExactly(history);
     }
 
     private void assertCorruptSuffix(int positionInRecord, byte changedByte, DataCorruptionException.Kind kind)

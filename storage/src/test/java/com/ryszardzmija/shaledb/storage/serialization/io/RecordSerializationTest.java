@@ -4,9 +4,10 @@ import com.ryszardzmija.shaledb.storage.durability.DurabilityConfig;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityMode;
 import com.ryszardzmija.shaledb.storage.durability.FileSystemSync;
 import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
-import com.ryszardzmija.shaledb.storage.hash.segment.model.LookupResult;
+import com.ryszardzmija.shaledb.storage.hash.segment.files.SegmentFile;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.MutableSegment;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentConfig;
+import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentChannelCleanup;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordPayload;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
 import org.junit.jupiter.api.Test;
@@ -183,24 +184,29 @@ class RecordSerializationTest {
     }
 
     @Test
-    void reopenedMutableSegmentAppendsAndIndexesNewRecordsWithoutOverwritingHistory() throws IOException {
+    void reopenedMutableSegmentAppendsAtEofWithoutOverwritingHistory() throws IOException {
         Path path = Files.createFile(tempDir.resolve("segment.data"));
+        var file = new SegmentFile(1, path);
+        var cleanup = new SegmentChannelCleanup();
         SegmentConfig config = new SegmentConfig(4096, MAX_PAYLOAD_SIZE);
         DurabilityConfig durability = new DurabilityConfig(DurabilityMode.SYNC_EACH_WRITE);
-        ByteKey historicalKey = new ByteKey(hex("dead"));
-        ByteKey newKey = new ByteKey(hex("0080ff"));
+        byte[] historicalKey = hex("dead");
+        byte[] newKey = hex("0080ff");
 
-        try (MutableSegment segment = new MutableSegment(path, config, durability)) {
-            segment.delete(historicalKey);
+        try (MutableSegment segment = new MutableSegment(file, config, durability, cleanup)) {
+            assertThat(segment.appendTombstone(historicalKey).writeOffset()).isZero();
         }
         assertThat(Files.readAllBytes(path)).containsExactly(hex(TOMBSTONE_RECORD_HEX));
+        long boundary = Files.size(path);
 
-        try (MutableSegment segment = new MutableSegment(path, config, durability)) {
-            segment.put(newKey, hex("c328"));
-
-            assertThat(segment.get(newKey)).isInstanceOfSatisfying(LookupResult.Present.class,
-                    result -> assertThat(result.value()).containsExactly(hex("c328")));
-            assertThat(segment.get(historicalKey)).isInstanceOf(LookupResult.Deleted.class);
+        try (MutableSegment segment = MutableSegment.reopen(file, config, durability, cleanup,
+                (record, offset) -> {
+                    assertThat(offset).isZero();
+                    assertRecord(record, RecordType.TOMBSTONE, historicalKey, new byte[0], boundary);
+                })) {
+            WriteResult appended = segment.appendValue(newKey, hex("c328"));
+            assertThat(appended.writeOffset()).isEqualTo(boundary);
+            assertThat(segment.readValue(appended.writeOffset(), new ByteKey(newKey))).containsExactly(hex("c328"));
         }
         assertThat(Files.readAllBytes(path)).containsExactly(hex(TOMBSTONE_RECORD_HEX + NORMAL_RECORD_HEX));
     }

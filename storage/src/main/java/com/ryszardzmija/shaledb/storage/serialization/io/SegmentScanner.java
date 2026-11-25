@@ -26,6 +26,14 @@ public final class SegmentScanner {
         }
     }
 
+    /** Validates a complete segment, rejecting an incomplete suffix. */
+    public void scanComplete(ObjLongConsumer<ReadResult> consumer) {
+        ScanResult scan = scan(consumer);
+        if (scan.incompleteTail() != null) {
+            throw new ScanException("Incomplete record at offset " + scan.validSize(), scan.incompleteTail());
+        }
+    }
+
     /**
      * Delivers each validated record and its starting offset in file order.
      * The caller owns the channel and keeps replay state provisional until scan and initialization succeed.
@@ -46,7 +54,7 @@ public final class SegmentScanner {
                 }
                 incompleteTail = e;
                 break;
-            } catch (RecordIOException e) {
+            } catch (RecordIOException | UnsupportedOperationException | SecurityException e) {
                 throw new ScanException("Failed to scan record at offset " + currentOffset, e);
             }
             consumer.accept(record, currentOffset);
@@ -64,7 +72,7 @@ public final class SegmentScanner {
     private long fileSize(long currentOffset) {
         try {
             return readChannel.size();
-        } catch (IOException e) {
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
             throw new ScanException("Failed to get segment extent while scanning at offset " + currentOffset, e);
         }
     }
