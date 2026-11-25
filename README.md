@@ -59,7 +59,7 @@ Each segment has an in-memory hash index that maps keys to offsets in the segmen
 
 Records include a CRC32C checksum, record type, key length, value length, key bytes, and value bytes. Reads, writes, and startup index rebuilds enforce the same record structure and payload limit. The engine rejects invalid mutations before append, and reads check for truncated records and checksum mismatches.
 
-The current durability mode is `SYNC_EACH_WRITE`. Each write is flushed before the in-memory index is updated, and startup can recover supported interrupted appends in the active segment. [Durability and recovery](docs/durability-and-recovery.md)
+The current durability mode is `SYNC_EACH_WRITE`. The segment writer returns the physical append result after flushing, and the mutable segment then updates its index. On startup, a validated record scanner feeds index reconstruction and identifies supported interrupted appends in the active segment. [Durability and recovery](docs/durability-and-recovery.md)
 
 ## Configuration
 

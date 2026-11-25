@@ -2,7 +2,7 @@ package com.ryszardzmija.shaledb.storage.hash.segment.model;
 
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
 
-/** A present index entry resolves to a valid record with an unexpected type or key. */
+/** An offset expected to hold a normal record resolves to a valid record with an unexpected type or key. */
 public final class IndexConsistencyException extends RecordIOException {
     private final long recordOffset;
 

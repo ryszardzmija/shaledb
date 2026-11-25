@@ -1,171 +1,116 @@
 package com.ryszardzmija.shaledb.storage.hash.segment.model;
 
 import com.ryszardzmija.shaledb.storage.durability.DurabilityMode;
-import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
-import com.ryszardzmija.shaledb.storage.hash.index.Index;
+import com.ryszardzmija.shaledb.storage.durability.FileSystemSync;
+import com.ryszardzmija.shaledb.storage.serialization.io.ReadRequest;
+import com.ryszardzmija.shaledb.storage.serialization.io.ReadResult;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
+import com.ryszardzmija.shaledb.storage.serialization.io.RecordReader;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordWriter;
 import com.ryszardzmija.shaledb.storage.serialization.io.WriteRequest;
 import com.ryszardzmija.shaledb.storage.serialization.io.WriteResult;
-import com.ryszardzmija.shaledb.storage.serialization.record.RecordPayload;
 import com.ryszardzmija.shaledb.storage.serialization.record.RecordType;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
-import org.mockito.InOrder;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
+import static java.nio.file.StandardOpenOption.CREATE_NEW;
+import static java.nio.file.StandardOpenOption.READ;
+import static java.nio.file.StandardOpenOption.WRITE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class SegmentWriterTest {
-    RecordWriter recordWriter;
-    Index index;
-    SegmentWriter segmentWriter;
+    private static final long MAX_PAYLOAD = 64;
+    private static final byte[] KEY = {0, -1};
+    private static final byte[] VALUE = {2, 3, -128};
+    private static final byte[] EMPTY = {};
 
-    @BeforeEach
-    void setUp() {
-        recordWriter = mock(RecordWriter.class);
-        index = mock(Index.class);
-        segmentWriter = new SegmentWriter(recordWriter, index, DurabilityMode.SYNC_EACH_WRITE);
+    @TempDir
+    Path directory;
+
+    @Test
+    void appendsCompleteRecordsAndForcesEachBeforeReturningItsActualLocation() throws IOException {
+        try (FileChannel channel = FileChannel.open(directory.resolve("segment.log"), CREATE_NEW, READ, WRITE)) {
+            List<Long> forcedExtents = new ArrayList<>();
+            FileSystemSync sync = mock(FileSystemSync.class);
+            doAnswer(call -> {
+                channel.force(true);
+                forcedExtents.add(channel.size());
+                return null;
+            }).when(sync).forceFile(channel);
+            SegmentWriter writer = new SegmentWriter(new RecordWriter(channel, sync, MAX_PAYLOAD),
+                    DurabilityMode.SYNC_EACH_WRITE);
+
+            WriteResult normal = writer.appendValue(KEY, VALUE);
+            long normalEnd = channel.size();
+            assertThat(forcedExtents).containsExactly(normalEnd);
+            WriteResult empty = writer.appendValue(KEY, EMPTY);
+            long emptyEnd = channel.size();
+            assertThat(forcedExtents).containsExactly(normalEnd, emptyEnd);
+            WriteResult tombstone = writer.appendTombstone(KEY);
+            long tombstoneEnd = channel.size();
+            assertThat(forcedExtents).containsExactly(normalEnd, emptyEnd, tombstoneEnd);
+
+            RecordReader reader = new RecordReader(channel, MAX_PAYLOAD);
+            assertRecord(reader, normal, 0, normalEnd, RecordType.NORMAL, VALUE);
+            assertRecord(reader, empty, normalEnd, emptyEnd, RecordType.NORMAL, EMPTY);
+            assertRecord(reader, tombstone, emptyEnd, tombstoneEnd, RecordType.TOMBSTONE, EMPTY);
+        }
     }
 
     @Test
-    void successfulPutExecutesCompleteFlow() {
-        ByteKey key = new ByteKey(new byte[] {1});
-        byte[] value = new byte[] {2};
-        long offset = 0L;
+    void appendFailureSkipsForceForBothRecordTypes() {
+        RecordWriter recordWriter = mock(RecordWriter.class);
+        SegmentWriter writer = new SegmentWriter(recordWriter, DurabilityMode.SYNC_EACH_WRITE);
+        RecordIOException failure = new RecordIOException("write failed", new IOException("error"));
+        when(recordWriter.write(any(WriteRequest.class))).thenThrow(failure);
 
-        when(recordWriter.write(any(WriteRequest.class)))
-                .thenReturn(new WriteResult(offset, 15));
-
-        segmentWriter.put(key, value);
-
-        InOrder inOrder = inOrder(recordWriter, index);
-        inOrder.verify(recordWriter).write(any(WriteRequest.class));
-        inOrder.verify(recordWriter).flushToStorage();
-        inOrder.verify(index).markPresent(key, offset);
-        inOrder.verifyNoMoreInteractions();
-    }
-
-    @Test
-    void putWritesNormalRecord() {
-        ByteKey key = new ByteKey(new byte[] {1});
-        byte[] value = new byte[] {2};
-        long offset = 0L;
-
-        ArgumentCaptor<WriteRequest> requestCaptor = ArgumentCaptor.forClass(WriteRequest.class);
-        when(recordWriter.write(requestCaptor.capture()))
-                .thenReturn(new WriteResult(offset, 15));
-
-        segmentWriter.put(key, value);
-
-        WriteRequest request = requestCaptor.getValue();
-        assertThat(request.type()).isEqualTo(RecordType.NORMAL);
-        assertThat(request.payload().key()).isEqualTo(key.getData());
-        assertThat(request.payload().value()).isEqualTo(value);
-    }
-
-    @Test
-    void putWriteFailureSkipsFlushingAndIndexUpdate() {
-        ByteKey key = new ByteKey(new byte[] {1});
-        byte[] value = new byte[] {2};
-        RecordIOException exception = new RecordIOException("write failed", new IOException("error"));
-
-        when(recordWriter.write(any(WriteRequest.class)))
-                .thenThrow(exception);
-
-        assertThatThrownBy(() -> segmentWriter.put(key, value))
-                .isSameAs(exception);
+        assertThatThrownBy(() -> writer.appendValue(KEY, VALUE)).isSameAs(failure);
+        assertThatThrownBy(() -> writer.appendTombstone(KEY)).isSameAs(failure);
 
         verify(recordWriter, never()).flushToStorage();
-        verify(index, never()).markPresent(any(), anyLong());
-        verify(index, never()).markDeleted(any());
     }
 
     @Test
-    void putFlushFailureSkipsIndexUpdate() {
-        ByteKey key = new ByteKey(new byte[] {1});
-        byte[] value = new byte[] {2};
-        long offset = 0L;
-        RecordIOException exception = new RecordIOException("flush failed", new IOException("error"));
+    void forceFailurePreventsEitherRecordTypeFromReturningAnAppendResult() {
+        RecordWriter recordWriter = mock(RecordWriter.class);
+        SegmentWriter writer = new SegmentWriter(recordWriter, DurabilityMode.SYNC_EACH_WRITE);
+        RecordIOException failure = new RecordIOException("force failed", new IOException("error"));
+        when(recordWriter.write(any(WriteRequest.class))).thenReturn(new WriteResult(5, 16));
+        doThrow(failure).when(recordWriter).flushToStorage();
 
-        when(recordWriter.write(any(WriteRequest.class)))
-                .thenReturn(new WriteResult(offset, 15));
-        doThrow(exception).when(recordWriter).flushToStorage();
-
-        assertThatThrownBy(() -> segmentWriter.put(key, value))
-                .isSameAs(exception);
-
-        verify(recordWriter).write(any(WriteRequest.class));
-        verify(index, never()).markPresent(any(), anyLong());
-        verify(index, never()).markDeleted(any());
+        assertThatThrownBy(() -> writer.appendValue(KEY, VALUE)).isSameAs(failure);
+        assertThatThrownBy(() -> writer.appendTombstone(KEY)).isSameAs(failure);
+        var order = inOrder(recordWriter);
+        order.verify(recordWriter).write(any(WriteRequest.class));
+        order.verify(recordWriter).flushToStorage();
+        order.verify(recordWriter).write(any(WriteRequest.class));
+        order.verify(recordWriter).flushToStorage();
+        order.verifyNoMoreInteractions();
     }
 
-    @Test
-    void successfulDeleteExecutesCompleteFlow() {
-        ByteKey key = new ByteKey(new byte[] {1});
-
-        segmentWriter.delete(key);
-
-        InOrder inOrder = inOrder(recordWriter, index);
-        inOrder.verify(recordWriter).write(any(WriteRequest.class));
-        inOrder.verify(recordWriter).flushToStorage();
-        inOrder.verify(index).markDeleted(key);
-        inOrder.verifyNoMoreInteractions();
-    }
-
-    @Test
-    void deleteWritesTombstoneRecord() {
-        ByteKey key = new ByteKey(new byte[] {1});
-        long offset = 0L;
-
-        ArgumentCaptor<WriteRequest> requestCaptor = ArgumentCaptor.forClass(WriteRequest.class);
-        when(recordWriter.write(requestCaptor.capture()))
-                .thenReturn(new WriteResult(offset, 14));
-
-        segmentWriter.delete(key);
-
-        WriteRequest request = requestCaptor.getValue();
-        assertThat(request.type()).isEqualTo(RecordType.TOMBSTONE);
-        assertThat(request.payload().key()).isEqualTo(key.getData());
-        assertThat(request.payload().value()).isEqualTo(RecordPayload.forTombstone(key.getData()).value());
-    }
-
-    @Test
-    void deleteWriteFailureSkipsFlushingAndIndexUpdate() {
-        ByteKey key = new ByteKey(new byte[] {1});
-        RecordIOException exception = new RecordIOException("write failed", new IOException("error"));
-
-        when(recordWriter.write(any(WriteRequest.class)))
-                .thenThrow(exception);
-
-        assertThatThrownBy(() -> segmentWriter.delete(key))
-                .isSameAs(exception);
-
-        verify(recordWriter, never()).flushToStorage();
-        verify(index, never()).markPresent(any(), anyLong());
-        verify(index, never()).markDeleted(any());
-    }
-
-    @Test
-    void deleteFlushFailureSkipsIndexUpdate() {
-        ByteKey key = new ByteKey(new byte[] {1});
-        long offset = 0L;
-        RecordIOException exception = new RecordIOException("flush failed", new IOException("error"));
-
-        when(recordWriter.write(any(WriteRequest.class)))
-                .thenReturn(new WriteResult(offset, 14));
-        doThrow(exception).when(recordWriter).flushToStorage();
-
-        assertThatThrownBy(() -> segmentWriter.delete(key))
-                .isSameAs(exception);
-
-        verify(recordWriter).write(any(WriteRequest.class));
-        verify(index, never()).markPresent(any(), anyLong());
-        verify(index, never()).markDeleted(any());
+    private static void assertRecord(RecordReader reader, WriteResult written, long offset, long end,
+                                     RecordType type, byte[] value) {
+        assertThat(written.writeOffset()).isEqualTo(offset);
+        assertThat(written.encodedRecordSize()).isEqualTo(end - offset);
+        ReadResult decoded = reader.read(new ReadRequest(written.writeOffset()));
+        assertThat(decoded.nextRecordOffset()).isEqualTo(end);
+        assertThat(decoded.recordType()).isEqualTo(type);
+        assertThat(decoded.recordPayload().key()).containsExactly(KEY);
+        assertThat(decoded.recordPayload().value()).containsExactly(value);
     }
 }

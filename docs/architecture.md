@@ -23,11 +23,16 @@ flowchart TD
     Lock --> Files
     Active --> ActiveIndex[Index for the active file]
     Older --> OldIndexes[One index per older file]
-    Active --> Codec[Record reader and writer]
-    Older --> Reader[Record reader]
-    Codec --> Files
+    Active --> Reader[Segment reader]
+    Older --> Reader
+    Active --> Writer[Segment writer]
+    ActiveIndex -. rebuilt by .-> Replay[IndexBuilder]
+    OldIndexes -. rebuilt by .-> Replay
+    Replay --> Scan[SegmentScanner]
+    Scan --> Files
     Reader --> Files
-    Codec --> Force[FileSystemSync]
+    Writer --> Files
+    Writer --> Force[FileSystemSync]
     Layout --> Force
 ```
 
@@ -39,7 +44,7 @@ flowchart TD
 | `storage.config` and `durability` | Map required settings to immutable records. `FileSystemSync` performs the file and directory force calls. The installed policy is sync on each write. [StorageConfigMapper](../storage/src/main/java/com/ryszardzmija/shaledb/storage/config/StorageConfigMapper.java) · [FileSystemSync](../storage/src/main/java/com/ryszardzmija/shaledb/storage/durability/FileSystemSync.java) |
 | `hash` and `hash.segment` | The engine owns the active segment, the newest-first history list and exclusive directory ownership. `files` selects and creates names, `loader` opens the layout, `model` owns channels and indexes, and `rollover` prepares replacements. The ownership object keeps channels that remain open after cleanup reachable. [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java) · [DatabaseLock](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/DatabaseLock.java) · [SegmentLoader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/loader/SegmentLoader.java) · [RolloverHandler](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/rollover/RolloverHandler.java) |
 | `hash.index` | An owned copy of the key plus an offset or deletion marker is retained per segment. Indexes exist only in memory and can be reconstructed from records. [HashIndex](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/HashIndex.java) · [IndexBuilder](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/IndexBuilder.java) |
-| `serialization` | `record` represents binary payloads and types. `spec` defines field widths, byte order and type codes. `io` turns records into channel writes and validates positional reads. [RecordWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordWriter.java) · [RecordReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordReader.java) |
+| `serialization` | `record` represents binary payloads and types. `spec` defines field widths, byte order and type codes. `io` encodes and validates records. `SegmentScanner` delivers validated records and offsets to a replay consumer. [RecordWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordWriter.java) · [RecordReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordReader.java) · [SegmentScanner](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/SegmentScanner.java) |
 
 At build time `server_lib` depends on both `//api:api` and `//storage:storage`. Storage links to the logging stack and uses JDK file APIs. It can operate without generated messages, Jackson, Netty or a running server. The segment directory holds the durable history. The engine infers the active segment from filenames on every open. [Server build](../server/BUILD.bazel) · [Storage build](../storage/BUILD.bazel) · [Segment management](segment-management.md)
 
@@ -53,21 +58,24 @@ The constructor derives the segment and durability settings and acquires exclusi
 sequenceDiagram
     participant C as Caller
     participant E as KeyValueStore / engine
-    participant W as Mutable segment / SegmentWriter
+    participant S as MutableSegment
+    participant W as SegmentWriter
     participant F as Append channel
     participant I as Active index
     C->>E: put(key, value) or delete(key)
     E->>E: Validate arguments and compute complete encoded size
     E->>E: Check physical size and publish a successor if needed
-    E->>W: Mutate the selected active segment
+    E->>S: Mutate the selected active segment
+    S->>W: Append normal record or tombstone
     W->>F: Capture offset and append complete encoded record
     W->>F: force(true)
+    W-->>S: Durable WriteResult
     alt put
-        W->>I: markPresent(key, offset)
+        S->>I: markPresent(key, offset)
     else delete
-        W->>I: markDeleted(key)
+        S->>I: markDeleted(key)
     end
-    W-->>E: Mutation published
+    S-->>E: Mutation published
     E-->>C: Return on normal completion
 ```
 
@@ -79,7 +87,8 @@ Both mutations append even when the logical state already matches the request. T
 sequenceDiagram
     participant C as Caller
     participant E as KeyValueStore / engine
-    participant S as SegmentReader
+    participant S as Mutable or immutable segment
+    participant R as SegmentReader
     participant F as Segment file
     C->>E: get(key)
     E->>E: Validate and copy key
@@ -88,12 +97,15 @@ sequenceDiagram
         alt Key marked deleted
             S-->>E: Deleted (stop)
         else Index contains offset
-            S->>F: Read header and payload at offset
-            F-->>S: Record bytes
-            S->>S: Validate extent, structure, CRC32C, type and key
+            S->>R: readValue(offset, key)
+            R->>F: Read header and payload at offset
+            F-->>R: Record bytes
+            R->>R: Validate extent, structure, CRC32C, type and key
             alt Validation succeeds
+                R-->>S: Validated value
                 S-->>E: Present(value) (stop)
             else Read or verification fails
+                R-->>S: Record exception
                 S-->>E: Exception (stop)
             end
         else No local history for key
@@ -109,6 +121,6 @@ Only an absent local entry permits the search to continue. A deletion marker ter
 
 - **Preserve the storage boundary.** A synchronous engine and a separate wire adapter allow the same implementation to serve both entry points. Serialization of RPC work is a server decision. The embedded caller must supply its own access discipline. [Concurrency and lifecycle](concurrency-and-lifecycle.md)
 - **Preserve reconstructible state.** Writing one record and rebuilding the derived index avoids having to atomically update separate data and index files. The costs are full replay at open, an index per segment and an ever-growing history. This trade-off is an architectural inference. [Indexing](indexing.md)
-- **Preserve explicit durability ordering.** The comment in `SegmentWriter.put` identifies correctness as the rationale for per-write force and acknowledges the throughput cost. This ordering gives a well-defined point to publish to readers. It leaves an uncertainty window when the storage stack reports failure. [SegmentWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentWriter.java)
+- **Preserve explicit durability ordering.** `SegmentWriter` returns the append result after the required force. `MutableSegment` then publishes the local index change. A reported force failure leaves the persistence outcome uncertain. [SegmentWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentWriter.java) · [MutableSegment](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/MutableSegment.java)
 - **Scoped resource ownership.** Segment constructors open channels and replay data before returning their segment. Load and rollover own their provisional segments until returning them to the engine. The engine retains responsibility for cleanup of any segment channel still open after a close error. [Concurrency and lifecycle](concurrency-and-lifecycle.md) · [Testing](testing.md)
 - **Segment extent and rollover policy.** Lookup and replay use the actual file extent and the payload read budget. The configured segment size limits new appends. Valid historical offsets remain readable beyond that threshold. [Segment management](segment-management.md) · [Configuration](configuration.md)
