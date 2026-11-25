@@ -13,6 +13,8 @@
 
 ShaleDB is a persistent key-value store written in Java. It implements a local storage engine with append-only segment files, in-memory hash indexes, CRC32C-validated records, tombstone deletes, size-based segment rollover, startup index rebuilds, conservative startup recovery, and validated YAML configuration. The store is also available through a small gRPC API for `Get`, `Put`, and `Delete`.
 
+For the storage contract, binary format, recovery policy and developer testing guide, see the [architecture guide](docs/README.md).
+
 ## Building and running
 
 ShaleDB requires JDK 25 or newer and uses Bazel for builds. Bazelisk is recommended because it reads `.bazelversion` and runs the pinned Bazel version for this repository.

@@ -1,8 +1,6 @@
 # Architecture
 
-ShaleDB implements single-key point reads, overwrites and deletes. A Java program can open a directory through `KeyValueStore`. The server exposes those operations through three unary RPCs. The unit of persistence is a record appended to a segment file. The unit of lookup is a binary key. There is no transaction grouping, range iteration, replication or persistent index in this implementation. This scope keeps both the protocol and the startup algorithm small. [Project overview](../README.md) · [StorageEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/StorageEngine.java) · [key_value_store.proto](../api/src/main/proto/shaledb/key_value_store.proto)
-
-## Components and ownership
+ShaleDB implements a Bitcask-inspired design for single-key reads, overwrites and deletes. Segment files hold the persistent history. Each open segment has an in-memory hash index derived from its records. Embedded applications call the engine directly. The gRPC server uses the same engine on behalf of remote clients. [Storage semantics](storage-semantics.md)
 
 ```mermaid
 flowchart TD
@@ -36,7 +34,7 @@ flowchart TD
     Layout --> Force
 ```
 
-| Boundary | State and responsibilities |
+| Module | Responsibility |
 | --- | --- |
 | `api` | Proto3 schema, generated Java messages, stubs and service base. The wire contract has no notion of a segment or file offset. [API build](../api/BUILD.bazel) |
 | `server` | `Application` owns configuration loading, directory preparation, store, executor and gRPC process lifecycle. Its service adapts messages, observer callbacks and exceptions to Java calls. [Application](../server/src/main/java/com/ryszardzmija/shaledb/server/Application.java) |
@@ -50,9 +48,9 @@ At build time `server_lib` depends on both `//api:api` and `//storage:storage`. 
 
 ## Opening a store
 
-The constructor derives the segment and durability settings and acquires exclusive ownership of the configured directory. Under that lock it discovers and validates the layout in one directory scan. The greatest numeric ID determines the active segment and seeds the factory's allocation counter. When the layout is empty, the factory creates and synchronizes the first file. The loader opens older segments newest first and the active segment last, building a fresh index for each file. The loader validates historical segments before recovering the discovered active segment and establishing its durability. The engine enters `OPEN` after installing the complete layout. Failed initialization cleans up under ownership. [Durability and recovery](durability-and-recovery.md) · [Concurrency and lifecycle](concurrency-and-lifecycle.md) · [Segment management](segment-management.md) · [Indexing](indexing.md)
+## Read and write paths
 
-## Put and delete
+On open, the engine acquires exclusive directory ownership, discovers segments by numeric ID and rebuilds an index for each file. The highest ID is the **active segment** (mutable). All lower IDs are **historical segments** (immutable). Embedded callers must serialize operations, including close. [Concurrency and lifecycle](concurrency-and-lifecycle.md)
 
 ```mermaid
 sequenceDiagram
@@ -115,9 +113,9 @@ sequenceDiagram
     E-->>C: Optional value, empty or storage exception
 ```
 
-Only an absent local entry permits the search to continue. A deletion marker terminates the search with absence. An unreadable or inconsistent indexed record terminates lookup with its original failure and sends the engine to `FAILED`. [Indexing](indexing.md) · [Fail-stop policy](storage-semantics.md#fail-stop-policy)
+## Design costs
 
-## Design decisions and trade-offs
+Keeping indexes reconstructible avoids a second persistent structure that would have to commit atomically with each record. The costs are a scan of the entire history at startup, retained keys in each segment's index, and potentially one index probe per segment on lookup. Without compaction, obsolete values and tombstones continue to occupy disk space and historical files stay open.
 
 - **Preserve the storage boundary.** A synchronous engine and a separate wire adapter allow the same implementation to serve both entry points. Serialization of RPC work is a server decision. The embedded caller must supply its own access discipline. [Concurrency and lifecycle](concurrency-and-lifecycle.md)
 - **Preserve reconstructible state.** Writing one record and rebuilding the derived index avoids having to atomically update separate data and index files. The costs are full replay at open, an index per segment and an ever-growing history. This trade-off is an architectural inference. [Indexing](indexing.md)

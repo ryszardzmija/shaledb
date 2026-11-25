@@ -2,26 +2,21 @@
 
 Each open segment owns one in-memory `Index` separate from its physical reader and writer. Its offsets are meaningful only in that file. A historical segment serves lookups from an index rebuilt during startup or inherited at retirement. The engine supplies recency ordering across files. [Index](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/Index.java) · [MutableSegment](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/MutableSegment.java) · [ImmutableSegment](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/ImmutableSegment.java)
 
-## Local key state
+## Key identity and local state
 
-`ByteKey` owns a copy of its input and returns a copy from `getData()`. It hashes the complete byte sequence with `Arrays.hashCode` and compares it with `Arrays.equals`. Equal binary keys have equal hashes, and equality resolves collisions between distinct keys. `matches` compares decoded bytes directly with the owned copy. [ByteKey](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/ByteKey.java)
+`ByteKey` copies the key bytes and uses content-based hashing and equality. Equal byte sequences supplied in different arrays identify the same key. Distinct keys with the same hash stay independent. Owning the bytes prevents a caller from changing an indexed key's hash by reusing its array. [ByteKey](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/ByteKey.java)
 
-`HashIndex` uses a `HashMap<ByteKey, Long>` for present keys and a `HashSet<ByteKey>` for deletions. Missing from both means no local record. `markPresent` checks that the offset is nonnegative, puts the offset and removes the deletion marker. `markDeleted` adds the marker and removes the offset. The two container changes form a single logical transition only under serialized access. [HashIndex](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/HashIndex.java)
+| Local state | Representation | Action on lookup |
+| --- | --- | --- |
+| Absent | Key in neither collection | Continue to the next older segment. |
+| Present | Key in the offset map | Read and validate the normal record at its offset. Return the value, including an empty value. |
+| Deleted | Key in the deletion set | Stop and return absence. The marker already represents a validated or successfully written tombstone. |
 
-```mermaid
-stateDiagram-v2
-    [*] --> Unseen
-    Unseen --> Present: normal record
-    Present --> Present: later normal replaces offset
-    Unseen --> Deleted: tombstone
-    Present --> Deleted: tombstone drops offset
-    Deleted --> Deleted: later tombstone
-    Deleted --> Present: later normal restores offset
-```
+A normal record replaces any previous local offset and clears a deletion marker. A tombstone installs a marker and removes the offset. Simply removing a deleted key would make it indistinguishable from a local miss and could expose an older value. These map and set changes rely on caller serialization.
 
 Both segment types use `SegmentLookup` to check the deletion marker first. A marker returns `Deleted` without rereading the tombstone. An empty offset after the marker check yields `NotPresent`. For a present entry, `SegmentReader.readValue` takes the physical offset and expected key and returns the value after validating the complete record. [SegmentLookup](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentLookup.java) · [SegmentReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentReader.java)
 
-## Live maintenance and replay
+The engine probes the active segment first and historical segments from highest to lowest ID. For a present entry, the reader checks the offset and validates the record against the actual file extent, payload budget and CRC32C. It also requires a normal record with the exact requested key. A valid record for a different key or a tombstone raises `INVALID_INDEX_REFERENCE`. A negative offset or one beyond EOF raises `INVALID_RECORD_LOCATION`. A point read exactly at EOF encounters an incomplete header. A failed indexed read ends the lookup and disables further operations. [SegmentReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentReader.java) · [Record format](record-format.md)
 
 `SegmentWriter` returns the append result only after successful append and force. `MutableSegment` publishes that result's starting offset for a put and a deletion marker for a delete. [SegmentWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentWriter.java) · [MutableSegment](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/MutableSegment.java)
 

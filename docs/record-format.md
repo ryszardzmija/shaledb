@@ -1,25 +1,27 @@
 # Record format
 
-A segment is a concatenation of records starting at file offset zero. Each record is self-delimiting once its 13-byte header has been validated. A zero-byte file contains zero records. There is no segment header, magic number, record count, version, terminator, padding or alignment. All offsets below are in bytes relative to the first byte of one record. [FormatInfo](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/spec/FormatInfo.java) · [RecordTypeCodec](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/spec/RecordTypeCodec.java) · [IndexBuilder](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/IndexBuilder.java)
+A segment is a sequence of records starting at file offset zero. An empty file contains zero records. There is no segment header, version field, padding or end marker. All multibyte fields are little-endian. [FormatInfo](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/spec/FormatInfo.java) · [RecordTypeCodec](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/spec/RecordTypeCodec.java)
 
-```text
-offset   0            4    5             9            13        13+K       13+K+V
-         | CRC32C     | T  | K           | V           | key     | value     |
-width          4        1         4             4            K          V
-                      |<-------------- bytes covered by CRC32C ------------>|
-```
+## Binary layout
 
-| Field | Interpretation |
-| --- | --- |
-| CRC32C | Unsigned 32-bit Castagnoli CRC in little-endian order. Compute standard CRC32C (Java `CRC32C`) over the raw type byte, both **encoded little-endian length fields**, the key, then the value. For a bitwise implementation, initialize to `0xffffffff`, process bits least-significant first using the reflected polynomial `0x82f63b78`, then XOR with `0xffffffff`. |
-| `T` | `0x00` normal (including a present empty value), `0x01` tombstone. The codec rejects every other type code. |
-| `K`, `V` | Two little-endian signed 32-bit integers giving byte counts. Both readers and writers require `K > 0` and `V >= 0`. A tombstone requires `V = 0`. |
-| Key, value | Raw uninterpreted bytes. A normal record can store a present value of zero bytes. There is no character encoding, separator or terminating null. |
-| Next boundary | For a record starting at file offset `p`, the next start is `p + 13 + K + V`. Ending exactly at the file size completes a scan. Even one extra trailing byte makes the scanner attempt another header. |
+Offsets are in bytes from the start of one record. The first four fields form the 13-byte header.
+
+| Offset | Width | Field | Encoding |
+| --- | --- | --- | --- |
+| 0 | 4 | Checksum | Unsigned CRC32C of all subsequent bytes in this record |
+| 4 | 1 | Type | `00` for a normal value, `01` for a tombstone (hex) |
+| 5 | 4 | K | Signed 32-bit key length in bytes, strictly positive |
+| 9 | 4 | V | Signed 32-bit value length in bytes, nonnegative |
+| 13 | K | Key | Raw bytes |
+| 13 + K | V | Value | Raw bytes. A tombstone requires V = 0. A normal record with V = 0 stores a present empty value. |
+
+The payload size is `K + V`. The encoded size is `13 + K + V`, so the smallest record occupies 14 bytes. The codec sums the lengths in a signed 64-bit integer before checking `K + V <= Integer.MAX_VALUE - 13` and `K + V <= maxPayloadSize`. The next record starts at the current file offset plus the encoded size. The writer checks that this end fits in a signed 64-bit file offset. [RecordWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordWriter.java) · [Configuration](configuration.md)
+
+The checksum uses CRC32C (Castagnoli, Java `CRC32C`) over the type byte, the eight encoded length bytes, the key and the value, in that order. In the bitwise form, the accumulator starts at `0xffffffff`, processes bits least-significant first with reflected polynomial `0x82f63b78` and ends with an XOR of `0xffffffff`. The writer stores the result at offset zero.
 
 ## Encoding examples
 
-Spaces delimit bytes. The vertical bars separate the six fields. These vectors come from tests with literal expected bytes that also decode each vector independently of the writer. [RecordSerializationTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordSerializationTest.java)
+Spaces delimit bytes. The vertical bars separate the six fields. These literal fixtures are tested independently in both encoding and decoding directions. [RecordSerializationTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordSerializationTest.java)
 
 ```text
 dd 05 7e 93 | 00 | 03 00 00 00 | 02 00 00 00 | 00 80 ff | c3 28
@@ -50,8 +52,8 @@ Short positive transfers continue from the bytes already transferred. Three cons
 | Channel I/O exception or repeated zero progress | `RecordIOException` retains the original `IOException`. A stalled transfer raises its `NoProgress` subtype. A failed write can leave a prefix in the file. [Durability and recovery](durability-and-recovery.md) |
 | CRC mismatch | `DataCorruptionException` with kind `CHECKSUM`. CRC includes the type and both lengths, so a change to the key/value boundary can be detected even at constant total length. CRC provides error detection with possible collisions. It supplies neither record identity nor evidence that the entire file set survived. |
 
-The buffer capacity uses a signed integer. A payload that fits the size and extent checks can still exceed available heap, and the reader also allocates separate output arrays. An incomplete payload describes the observed byte shortage. Damaged length fields can produce the same observation as an interrupted append. Reads leave file bytes intact. Startup truncation follows the append-prefix failure model. [Durability and recovery](durability-and-recovery.md) · [RecordReaderTest](../storage/src/test/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordReaderTest.java)
+At a verified record boundary, exact EOF ends a sequential scan. When the reader expects a record at an offset, it first checks that the observed file extent contains all 13 header bytes. A point read at EOF therefore reports an incomplete header.
 
-## Compatibility and alternatives
+The reader decodes the type and lengths, rejecting unknown types, invalid lengths, tombstones with value bytes and unrepresentable sizes. It checks the configured payload budget next, then checks that the entire declared payload fits within the observed extent before allocating its buffer. It returns a record and the next offset only after verifying the checksum. Reads and writes continue after short positive transfers and fail after three consecutive zero-progress transfers. If a transfer reaches EOF despite fitting in the observed extent, recovery treats it as an I/O failure. [RecordReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordReader.java)
 
-A reader interpreting existing files needs the layout above and a payload budget compatible with the entire history. Configuration values are absent from the bytes. Existing valid records retain their encoding, as verified by the independently decoded byte vectors. A historical tombstone containing value bytes fails validation. [Configuration](configuration.md) · [Testing](testing.md)
+The bytes carry neither a version nor the writer's configuration. A compatible reader needs the same layout and a sufficient read budget for every record, including obsolete ones. The checksum covers the lengths but can only be verified once the full payload is present. A plausible damaged length can therefore resemble an interrupted append. [Durability and recovery](durability-and-recovery.md)

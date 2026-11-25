@@ -1,8 +1,8 @@
 # Durability and recovery
 
-ShaleDB persists the append history. On open it accepts every complete record the reader validates, including one whose caller never received success. It has no commit marker, undo log, persisted index, checkpoint or alternate replica. The disk record, the in-memory visibility of its effect and the caller's acknowledgment are three distinct events. [RecordWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/RecordWriter.java) · [SegmentWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentWriter.java) · [IndexBuilder](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/IndexBuilder.java)
+Under the append-prefix model below, successful mutations survive interruption. Recovery preserves the validated record history and applies its latest record for each key. A later complete record can supersede an acknowledged value even if its own caller never received success. The log has no per-record commit or acknowledgment marker.
 
-## Boundaries on the success path
+## What a successful mutation establishes
 
 | Event | What has happened when it returns |
 | --- | --- |
@@ -30,33 +30,23 @@ The table assumes serialized operations, an initially readable history, compatib
 | During startup or replay | Earlier files may have been opened and partly or completely indexed in memory. Replay validates history and can shorten the active file at a validated record boundary. Empty-directory initialization can create the first segment. Reopen forces the discovered active file and directory after validating the history. | A failed load returns no engine. Expected open and replay failures trigger channel cleanup. A cause such as temporary I/O or incompatible settings can persist across attempts. | Another open starts again at offset zero in each file. Detectable corruption fails again. A successful truncation can remain in effect after a later startup failure. |
 | During close | A failed final force leaves any previously uncertain bytes uncertain. The engine attempts channel release after that force failure. | A force or channel close failure reaches the caller. The first failure remains primary, with later cleanup failures suppressed. [Lifecycle](concurrency-and-lifecycle.md) | Reopen judges the actual surviving files. A final force error alone does not establish that earlier individually forced records were lost. |
 
-## Interrupted rollover
+The engine appends the entire record at physical EOF. Under `SYNC_EACH_WRITE`, its sole durability policy, it calls `FileChannel.force(true)` on the write channel to persist the record bytes and file-length metadata. After the force succeeds, the engine publishes the offset or deletion marker in the active index and returns. This order keeps a mutation whose force failed out of the live index. Remote acknowledgment also depends on the client receiving successful RPC completion. [FileSystemSync](../storage/src/main/java/com/ryszardzmija/shaledb/storage/durability/FileSystemSync.java) · [SegmentWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentWriter.java)
 
-The previous active file stays complete and unchanged throughout rollover. Its prior record and publication barriers protect its acknowledged history under the stated filesystem assumptions. Process termination can leave dirty pages and directory entries visible to the next process. An OS crash or power loss can lose unforced state. Highest-ID discovery determines the next active segment in either case, independent of the previous JVM's handoff.
+A failed append can leave zero bytes, a prefix or the whole record. If the force fails, all bytes were transferred but their persistence is uncertain. If the force succeeds and index publication or response delivery fails, the record can be durable without acknowledgment. After a terminal storage failure the engine refuses further operations. This prevents reads from a possibly stale index and keeps a second append from burying a partial record. Closing a failed engine skips the final force. [Storage semantics](storage-semantics.md) · [Concurrency and lifecycle](concurrency-and-lifecycle.md)
 
-| Interruption point | Process termination | OS crash or power loss | Next open and recovery implications |
-| --- | --- | --- | --- |
-| Before rollover or after old-writer retirement, before create-new | Only existing history is present. | The existing published layout survives. | The old file stays active. The incoming record is absent. |
-| During creation or before both successor barriers complete | The successor may be absent or visible as an empty file. | The successor directory entry may be lost. A surviving successor is empty under the supported filesystem model. | The greatest surviving ID becomes active. Replay accepts the empty file and restores its publication barriers before use. |
-| After both barriers, during successor initialization or in-memory handoff, or just before append | The successor is empty. The old file and incoming mutation are unchanged. | The published empty successor survives. | The successor is active. The previous file is historical and the incoming record is absent. |
-| During append or after complete transfer, before a successful record force | The successor may expose zero bytes of the record, a prefix or a complete record. | Unforced bytes may be absent, incomplete or complete. | Complete valid records replay. An eligible short tail in the active file is removed and the retained prefix is forced. |
-| After a successful record force, during index publication or before acknowledgment | The complete record is visible in the successor. | The complete record survives under the publication and record-force assumptions. | Replay applies the record even if the caller received no acknowledgment. |
-| After acknowledgment | The complete record is visible in the successor. | Both the filename and the record satisfy their force barriers. | Replay preserves the acknowledged mutation. |
+## Supported failure model
 
-Runtime cleanup closes resources and retains the ownership lock until safe release. When creation itself fails, the factory may attempt cleanup of its own new file. A valid empty successor left after successful creation and a later failure remains eligible for discovery. This layout model cannot detect all missing files or identify a caller's acknowledgment from the log. [Segment management](segment-management.md)
+One cooperating engine owns a stable local database directory and serializes operations. Previously synchronized record bytes, file lengths and published filenames survive. An interrupted append may contribute only a contiguous prefix of the incoming record, up to and including its full length. Rollover retires a complete segment before publishing a successor. Together with fail-stop, this confines an interrupted append to the highest-ID file.
 
-## What the environment can invalidate
+Recovery depends on coherent sizes and reads across the active file's two handles, reliable exclusive locking, and a truncate that preserves bytes before the requested boundary even when interrupted. The filesystem must support forcing a directory. The storage stack must honor ordered file and directory forces, including a force on a reopened file covering retained dirty data from an earlier handle. The database directory and its ancestors must already have durable names. The server can create missing directories but does not force each new ancestor.
 
-| Event | Recovery implications |
+| Interruption | What may survive |
 | --- | --- |
-| Normal shutdown and reopen | With complete writer/reader-compatible history, stable names and exclusive access, reconstruction replays the same logical order. A clean shutdown cannot make an oversized record acceptable or repair an already malformed tail. |
-| Unexpected process termination | The OS releases the file lock and leaves the `LOCK` entry available to reuse. JVM indexes are lost. The OS and its page cache may survive, so even an unforced complete record may be visible to the next owner. Replay requires complete, compatible historical files and applies the active-tail policy below. |
-| Operating-system crash | Volatile OS cache can be lost. Survival of previously forced file data and necessary directory entries depends on the local filesystem's persistence semantics. A write in progress has no whole-record atomicity guarantee. |
-| Power loss | Filesystem guarantees additionally depend on controller/device cache flushes and write ordering surviving loss of power. The code cannot observe whether a device honored a successful force. Unforced writes and newly created ancestors are uncertain. |
-| Filesystem or device failure | Open, append, force, read and cleanup may independently fail. Neither another force nor a new process guarantees recovery. Damage can affect previously acknowledged records or the directory itself. |
-| Arbitrary persistent corruption | Types, lengths and CRCs catch many damaged records during replay or a present lookup. Present lookups also detect valid records with the wrong key or type. A missing segment, clean truncation at a record boundary, or substitution of a valid normal record with the same key can still escape detection. |
+| Process termination | JVM indexes disappear and the OS releases the native lock. The OS page cache may retain a complete unforced record or a filename whose directory force never finished. |
+| Operating-system crash | Volatile OS state may be lost. Acknowledged history depends on the filesystem preserving completed barriers. An in-progress record has no whole-record atomicity guarantee. |
+| Physical power loss | Survival additionally depends on controller and device caches honoring flushes and write ordering. Forcing a file successfully in a test cannot establish physical power-loss behavior. |
 
-The implementation assumes a provider that supports positioning the write channel at EOF, coherent positional reads from a second handle, and opening and forcing a directory. It also assumes durable directory ancestry, stable filenames and a storage stack with meaningful force semantics. The repository's real-file tests exercise the test host. They provide no power-cut or device-failure evidence. [Testing](testing.md)
+## Startup under exclusive ownership
 
 ## Supported append-prefix failure model
 
@@ -77,34 +67,27 @@ The reconstructed index stays provisional until startup succeeds. A replay-consu
 
 ## Recovery policy
 
-| Scan or startup outcome | Discovered active segment | Historical segment | Startup failure reason when applicable |
-| --- | --- | --- | --- |
-| Empty segment or EOF exactly at a complete record boundary | Retain the bytes and force the active file and directory | Accept with read-only replay | — |
-| Fewer than 13 bytes at the next record boundary, with at least one byte present | Truncate the incomplete header | Reject and preserve the bytes | `INCOMPLETE_RECORD` for history |
-| Complete valid header with compatible payload size, ending beyond the observed file extent | Truncate the incomplete payload and its header | Reject and preserve the bytes | `INCOMPLETE_RECORD` for history |
-| Invalid type or lengths, or an unrepresentable encoded size | Reject and preserve the bytes | Reject and preserve the bytes | `STRUCTURAL_CORRUPTION` |
-| Complete record with bad CRC32C | Reject and preserve the bytes | Reject and preserve the bytes | `CHECKSUM_CORRUPTION` |
-| Payload exceeds the configured read limit | Reject and preserve the bytes | Reject and preserve the bytes | `INCOMPATIBLE_RECORD_SIZE` |
-| Read error, repeated zero progress, unexpected transfer EOF, or a contradictory extent | Reject without truncation | Reject and preserve the bytes | `STORAGE_IO` |
-| Invalid or ambiguous layout | Reject before opening segments | Reject before opening segments | `INVALID_SEGMENT_METADATA` |
-| Truncation or verification of the resulting length fails | Reject. The length may already have changed. | — | `STORAGE_IO` |
-| Required file or directory force fails | Reject. Any earlier truncation may remain in effect. | — | `DURABILITY` |
+Each row describes the observation at the next verified record boundary. Rejection during scan preserves the bytes in question.
 
-The extent check for a complete header follows type, length, representability and configured read-limit validation and precedes allocation of the payload buffer. An unexpected EOF during transfer contradicts the established extent. The reader carries that distinction along with the record offset, section and byte counts. Indexed reads still fail on a missing or incomplete expected record. Recovery carries startup failures through the existing exception chain, preserves the primary cause, and suppresses secondary cleanup failures. Ownership stays held until safe release. [Record format](record-format.md) · [Concurrency and lifecycle](concurrency-and-lifecycle.md)
+| Observation | Discovered active segment | Historical segment |
+| --- | --- | --- |
+| Complete, size-compatible and structurally valid record with matching CRC32C | Apply record and advance | Same |
+| Exact EOF, including a zero-byte file | Finish scan and perform both startup forces | Finish scan |
+| 1–12 bytes available for the next header | Remove the incomplete header | Fail with `INCOMPLETE_RECORD` |
+| Complete valid, size-compatible header declares more payload bytes than remain | Remove the header and partial payload | Fail with `INCOMPLETE_RECORD` |
+| Invalid type, lengths or unrepresentable encoded size | Fail with `STRUCTURAL_CORRUPTION` | Same |
+| Complete record with a checksum mismatch | Fail with `CHECKSUM_CORRUPTION`, including at the end of the file | Same |
+| Representable payload exceeds `maxPayloadSize` | Fail with `INCOMPATIBLE_RECORD_SIZE` before checking payload extent | Same |
+| Ordinary read I/O error, repeated zero progress, premature transfer EOF within an established extent, or inconsistent sizes | Fail with `STORAGE_IO` | Same for historical replay |
 
-## Interrupted recovery and repeatability
+A checksum mismatch on a complete record cannot establish which bytes are expendable. Discarding it could roll back acknowledged history. A failed truncation or length check reports storage I/O and can leave the file already shortened. A failed required force aborts open with a durability error. Cleanup preserves the primary failure. [Record format](record-format.md) · [Concurrency and lifecycle](concurrency-and-lifecycle.md)
 
-| Interruption boundary | Behavior on the next open |
-| --- | --- |
-| Before or during scanning, or after scanning and before truncation | Rebuild from the beginning and classify the same suffix if it survives. |
-| During truncation | Validate the resulting bytes and remove any remaining eligible suffix. This depends on preservation of the validated prefix. |
-| After truncation and before or during file or directory force | Scan the retained prefix and retry both startup barriers. If the shortened length did not survive and the suffix reappears, classify it again. |
-| After the barriers, during initialization or before `OPEN` | Rebuild the indexes from disk and repeat the startup barriers. Exact EOF requires no further truncation. |
+## Interrupted rollover and recovery
 
-The record boundary comes from the bytes that survive each attempt. Under the model, repeating startup preserves the same complete records without a recovery marker. A failed attempt can leave an already shortened file. Startup never reconstructs discarded bytes.
+If rollover stops before creating the successor, the retiring file is still the highest ID on disk. During publication, a successor name may or may not survive. After both creation barriers it names a durable empty file, even if the process never installed it in memory. The next owner uses the highest surviving ID in all three cases. If an append started in the successor, the same active-tail rules apply.
 
-## Limits of format and verification
+Recovery is idempotent under the stated assumptions. After interruption during scanning, truncation or either force, the next open scans from zero again. If the old length survives, it removes any remaining eligible suffix. If the shorter length survives, it retains the validated prefix. Both paths force the discovered active file and directory again before use. Further writes start at the recovered EOF.
 
-The checksum covers type, lengths and payload when all covered bytes are present. A structurally plausible corrupted length can claim bytes beyond EOF, producing the same observation as an interrupted append. A short header can likewise come from a source outside the failure model. Detected structural or checksum corruption stops startup. The format cannot reliably detect a lost segment or history lost at an exact record boundary. Independently checksummed headers or stronger record framing could improve diagnosis. An authoritative, durably published description of the file set could make missing segments detectable.
+## Detection limits
 
-M1.11 verifies recovery on the test host using real files and deterministic failure injection. M1.12 retains integrated subprocess crash verification at controlled boundaries. Power-loss and device-failure guarantees still depend on the stated storage model. [Testing](testing.md)
+The format lacks an independently verifiable header. A damaged but plausible length pointing past EOF can look exactly like an interrupted payload. A missing segment, loss at a clean record boundary or substitution by another valid record can also go undetected. Recovery cannot reconstruct arbitrary media damage, non-prefix torn writes, external edits or lost files. Real-file tests and deterministic faults exercise the policy and ordering on the test host. Physical durability depends on the environment above. [Testing](testing.md)
