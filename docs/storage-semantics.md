@@ -8,11 +8,11 @@
 | `get(key)` | Return `Optional.of(value)` for a present key, including a zero-length value. Return `Optional.empty()` for a missing or deleted key. An unreadable indexed record raises an error even if an older value exists. |
 | `delete(key)` | Append a tombstone, even for a missing or already deleted key. The tombstone shadows every earlier value, including values in historical segments. |
 
-All three calls reject a null or empty key. Mutations also check the combined key and value length against the configured payload limit. A tombstone counts only its key. Lookup keys can exceed the payload limit. Invalid input raises `IllegalArgumentException` before the engine queries capacity, rolls over or appends, leaving the log and indexes usable. On a failed or closed store, availability checks precede validation. [Configuration](configuration.md) · [Concurrency and lifecycle](concurrency-and-lifecycle.md)
+All three calls reject a null or empty key. Mutations also check the combined key and value length against the configured payload limit. A tombstone counts only its key. Lookup keys can exceed the payload limit. Invalid input raises `IllegalArgumentException` before the engine queries capacity, rolls over or appends, leaving the log and key directory usable. On a failed or closed store, availability checks precede validation. [Configuration](configuration.md) · [Concurrency and lifecycle](concurrency-and-lifecycle.md)
 
 ## Success and retry
 
-Both `put` and `delete` return `void`. A normal return means the record passed its required durability barrier and the mutable segment published the returned offset or a deletion marker. Subsequent serialized reads and ordinary reopens see the latest mutation under the supported storage assumptions. If the caller loses the acknowledgment, a complete record can still take effect on replay. [Durability and recovery](durability-and-recovery.md)
+Both `put` and `delete` return `void`. A normal return means the record passed its required durability barrier and the engine published the destination segment ID and offset or removed the deleted key from the global directory. Subsequent serialized reads and ordinary reopens see the latest mutation under the supported storage assumptions. If the caller loses the acknowledgment, a complete record can still take effect on replay. [Durability and recovery](durability-and-recovery.md)
 
 Repeating an identical mutation leaves the same logical value if nothing intervenes, but each successful call appends a record. Retrying a delete after another caller reinserts the key deletes that new value. There are no request IDs, conditional updates or exactly-once semantics.
 
@@ -24,7 +24,7 @@ Expected operational failures raise `StorageEngineException`. Its `operation()` 
 | --- | --- |
 | Failure preparing a destination for a mutation | `NOT_APPENDED` applies to the incoming record. A successor file may already exist. `SEGMENT_ID_EXHAUSTED` leaves the engine open for reads and writes that fit. Other operational preparation failures are terminal. |
 | Append or file-force failure | `UNKNOWN`. The file can contain a partial or complete record. A force failure reports `DURABILITY`. The engine stops serving reads and writes. |
-| Unexpected unchecked failure during index publication | The record has passed its file force and the index may be partly updated. The engine enters `FAILED` and propagates the original failure without assigning a mutation outcome. |
+| Unexpected unchecked failure during directory publication | The record has passed its file force and the directory update may have taken effect. The engine enters `FAILED` and propagates the original failure without assigning a mutation outcome. |
 | Operational failure outside a mutation | `NOT_APPLICABLE`. For a failed indexed read, the reason distinguishes corruption, incomplete records, invalid offsets or index references, incompatible payload sizes, and storage I/O. Startup also distinguishes invalid segment metadata, lock contention, invalid lock files and ownership I/O. |
 | A subsequent operation on a failed or closed store | `IllegalStateException` before any file access. In `FAILED` it carries the first terminal failure. |
 

@@ -7,7 +7,7 @@ ShaleDB is a local, append-only store for binary keys and values. Both embedded 
 Start with [Architecture](architecture.md) and [Storage semantics](storage-semantics.md) for the system overview and the behavior of reads, writes and deletes.
 
 - [Record format](record-format.md) covers binary layout, checksum and validation.
-- [Indexing](indexing.md) covers per-segment lookup and index reconstruction.
+- [Indexing](indexing.md) covers the global key directory, direct lookup and chronological replay.
 - [Segment management](segment-management.md) covers file discovery, capacity and rollover.
 - [Durability and recovery](durability-and-recovery.md) covers acknowledgment, filesystem assumptions and startup repair.
 

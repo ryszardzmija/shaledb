@@ -114,6 +114,32 @@ class KeyValueStoreRecoveryTest {
     }
 
     @Test
+    void incompleteActiveOverwriteKeepsTheHistoricalLocation() throws IOException {
+        Path historical = Files.write(segment(directory, 1), FIRST);
+        Path active = Files.write(segment(directory, 5), Arrays.copyOf(OVERWRITE, OVERWRITE.length - 1));
+        try (KeyValueStore store = new KeyValueStore(config(directory, 30, 128))) {
+            assertValue(store, KEY, VALUE);
+            assertThat(active).isEmptyFile();
+        }
+        assertThat(Files.readAllBytes(historical)).containsExactly(FIRST);
+    }
+
+    @Test
+    void incompleteActiveReinsertionKeepsTheHistoricalDeletion() throws IOException {
+        Path oldest = Files.write(segment(directory, 1), FIRST);
+        Path historical = Files.write(segment(directory, 2), TOMBSTONE);
+        Path active = Files.write(segment(directory, 5), Arrays.copyOf(OVERWRITE, OVERWRITE.length - 1));
+        for (int i = 0; i < 2; i++) {
+            try (KeyValueStore store = new KeyValueStore(config(directory, 30, 128))) {
+                assertThat(store.get(KEY)).isEmpty();
+                assertThat(active).isEmptyFile();
+            }
+        }
+        assertThat(Files.readAllBytes(oldest)).containsExactly(FIRST);
+        assertThat(Files.readAllBytes(historical)).containsExactly(TOMBSTONE);
+    }
+
+    @Test
     void checksCapacityAtTheRecoveredBoundaryAndRetiresCompleteHistory() throws IOException {
         int combinedSize = FIRST.length + OVERWRITE.length;
         for (int maxSize : new int[] {combinedSize + 1, combinedSize, combinedSize - 1}) {

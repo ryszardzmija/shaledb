@@ -1,71 +1,64 @@
 package com.ryszardzmija.shaledb.storage.hash.segment.model;
 
 import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
-import com.ryszardzmija.shaledb.storage.hash.index.Index;
-import com.ryszardzmija.shaledb.storage.hash.index.IndexBuildException;
-import com.ryszardzmija.shaledb.storage.hash.index.IndexBuilder;
+import com.ryszardzmija.shaledb.storage.hash.segment.files.SegmentFile;
+import com.ryszardzmija.shaledb.storage.serialization.io.ReadResult;
+import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordReader;
+import com.ryszardzmija.shaledb.storage.serialization.io.SegmentScanner;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
-import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Objects;
+import java.util.function.ObjLongConsumer;
 
 public class ImmutableSegment implements AutoCloseable {
-    private final Path path;
+    private final SegmentFile file;
     private final FileChannel readChannel;
     private final SegmentReader segmentReader;
-    private final Index index;
     private final SegmentChannelCleanup channelCleanup;
     private boolean closeStarted;
 
-    ImmutableSegment(Path path, FileChannel readChannel, SegmentReader segmentReader, Index index,
+    ImmutableSegment(SegmentFile file, FileChannel readChannel, SegmentReader segmentReader,
                       SegmentChannelCleanup channelCleanup) {
-        this.path = path;
+        this.file = file;
         this.readChannel = readChannel;
         this.segmentReader = segmentReader;
-        this.index = index;
         this.channelCleanup = channelCleanup;
     }
 
-    public ImmutableSegment(Path path, SegmentConfig config, SegmentChannelCleanup channelCleanup) {
-        this.path = Objects.requireNonNull(path);
+    public ImmutableSegment(SegmentFile file, SegmentConfig config, SegmentChannelCleanup channelCleanup,
+                            ObjLongConsumer<ReadResult> replayRecord) {
+        this.file = Objects.requireNonNull(file);
         this.channelCleanup = Objects.requireNonNull(channelCleanup);
 
-        FileChannel openedReadChannel = null;
         try {
-            openedReadChannel = FileChannel.open(path, StandardOpenOption.READ);
-
-            this.readChannel = openedReadChannel;
-            this.index = new IndexBuilder(readChannel, config.maxPayloadSize()).build();
+            this.readChannel = FileChannel.open(file.path(), StandardOpenOption.READ);
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
+            throw new SegmentIOException("Failed to open the segment file " + file.path(), e);
+        }
+        try {
+            new SegmentScanner(readChannel, config.maxPayloadSize()).scanComplete(replayRecord);
             this.segmentReader = new SegmentReader(new RecordReader(readChannel, config.maxPayloadSize()));
-        } catch (IOException | RuntimeException | Error e) {
-            channelCleanup.closeAfterFailure(path, e, openedReadChannel);
-
-            if (e instanceof IndexBuildException ie) {
-                throw new SegmentIOException("Failed to create index for segment file " + path, ie);
+        } catch (RuntimeException | Error e) {
+            channelCleanup.closeAfterFailure(file.path(), e, readChannel);
+            if (e instanceof SegmentScanner.ScanException scanFailure) {
+                throw new SegmentIOException("Failed to replay historical segment " + file.path(), scanFailure);
             }
-
-            if (e instanceof IOException || e instanceof UnsupportedOperationException || e instanceof SecurityException) {
-                throw new SegmentIOException("Failed to open the segment file " + path, e);
-            }
-            if (e instanceof RuntimeException unexpected) {
-                throw unexpected;
-            }
-            throw (Error) e;
+            throw e;
         }
     }
 
-    public LookupResult get(ByteKey key) {
-        return SegmentLookup.get(path, index, segmentReader, key);
+    public long id() {
+        return file.id();
     }
 
-    public long size() {
+    public byte[] readValue(long offset, ByteKey expectedKey) {
         try {
-            return readChannel.size();
-        } catch (IOException e) {
-            throw new SegmentIOException("Failed to get size of segment " + path, e);
+            return segmentReader.readValue(offset, expectedKey);
+        } catch (RecordIOException e) {
+            throw new SegmentIOException("Failed to read from segment " + file.path(), e);
         }
     }
 
@@ -76,9 +69,9 @@ public class ImmutableSegment implements AutoCloseable {
         }
         closeStarted = true;
         try {
-            channelCleanup.close(path, readChannel);
+            channelCleanup.close(file.path(), readChannel);
         } catch (IOException e) {
-            throw new SegmentIOException("Failed to close segment " + path, e);
+            throw new SegmentIOException("Failed to close segment " + file.path(), e);
         }
     }
 }

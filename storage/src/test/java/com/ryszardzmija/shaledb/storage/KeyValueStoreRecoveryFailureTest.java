@@ -3,10 +3,19 @@ package com.ryszardzmija.shaledb.storage;
 import com.ryszardzmija.shaledb.storage.StorageEngineException.Operation;
 import com.ryszardzmija.shaledb.storage.StorageEngineException.Reason;
 import com.ryszardzmija.shaledb.storage.config.StorageConfig;
+import com.ryszardzmija.shaledb.storage.durability.DurabilityConfig;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityException;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityMode;
+import com.ryszardzmija.shaledb.storage.durability.FileSystemSync;
 import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
-import com.ryszardzmija.shaledb.storage.hash.index.HashIndex;
+import com.ryszardzmija.shaledb.storage.hash.index.KeyDirectory;
+import com.ryszardzmija.shaledb.storage.hash.index.RecordLocation;
+import com.ryszardzmija.shaledb.storage.hash.segment.files.SegmentFile;
+import com.ryszardzmija.shaledb.storage.hash.segment.files.SegmentLayout;
+import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoader;
+import com.ryszardzmija.shaledb.storage.hash.segment.model.ImmutableSegment;
+import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentChannelCleanup;
+import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentConfig;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentWriter;
 import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,6 +29,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
 
@@ -87,7 +97,7 @@ class KeyValueStoreRecoveryFailureTest {
 
     @Test
     void replayFailurePreventsRecoveryAndClosesAllAcquiredSegmentChannels() throws IOException {
-        var replayFailure = new IllegalStateException("index replay failed");
+        var replayFailure = new IllegalStateException("directory replay failed");
         var cleanupFailure = new IOException("reader close reported an error");
         Path historical = Files.createFile(segment(2));
         try (FileChannel historicalReader = FileChannel.open(historical, READ);
@@ -101,14 +111,11 @@ class KeyValueStoreRecoveryFailureTest {
             }).when(reader).close();
 
             try (var channels = useActiveChannels(reader, writer, null);
-                 var indexes = mockConstruction(HashIndex.class, (index, context) -> {
-                     if (context.getCount() == 2) {
-                         doThrow(replayFailure).when(index).markPresent(new ByteKey(KEY), 0);
-                     }
-                 })) {
+                 var directories = mockConstruction(KeyDirectory.class, (keyDirectory, context) ->
+                         doThrow(replayFailure).when(keyDirectory).markPresent(new ByteKey(KEY), new RecordLocation(3, 0)))) {
                 channels.when(() -> FileChannel.open(historical, READ)).thenReturn(historicalReader);
                 assertThatThrownBy(this::open).isSameAs(replayFailure).hasSuppressedException(cleanupFailure);
-                assertThat(indexes.constructed()).hasSize(2);
+                assertThat(directories.constructed()).hasSize(1);
             }
 
             verify(reader, never()).read(any(ByteBuffer.class), eq(BOUNDARY));
@@ -117,6 +124,53 @@ class KeyValueStoreRecoveryFailureTest {
             assertThat(historicalReader.isOpen()).isFalse();
             assertThat(readFile.isOpen()).isFalse();
             assertThat(writeFile.isOpen()).isFalse();
+        }
+        assertThat(Files.readAllBytes(active)).containsExactly(INTERRUPTED);
+        assertReopenRecovers();
+    }
+
+    @Test
+    void closesInitializedHistoryWhenStartupRegistryInsertionFailsBeforeLinking() throws IOException {
+        assertStartupRegistryFailure(false);
+    }
+
+    @Test
+    void closesInitializedHistoryWhenStartupRegistryInsertionFailsAfterLinking() throws IOException {
+        assertStartupRegistryFailure(true);
+    }
+
+    private void assertStartupRegistryFailure(boolean afterInsertion) throws IOException {
+        var failure = new IllegalStateException("startup registry insertion failed");
+        Path older = Files.write(segment(1), FIRST);
+        Path newer = Files.write(segment(2), OVERWRITE);
+        var registry = new HashMap<Long, ImmutableSegment>() {
+            @Override
+            public ImmutableSegment putIfAbsent(Long id, ImmutableSegment segment) {
+                if (id == 1 || afterInsertion) {
+                    super.putIfAbsent(id, segment);
+                }
+                if (id == 2) {
+                    throw failure;
+                }
+                return null;
+            }
+        };
+        var layout = new SegmentLayout(List.of(new SegmentFile(1, older), new SegmentFile(2, newer)),
+                new SegmentFile(3, active));
+        var cleanup = new SegmentChannelCleanup();
+        var loader = new SegmentLoader(new SegmentConfig(256, 128), new DurabilityConfig(DurabilityMode.SYNC_EACH_WRITE),
+                cleanup, new FileSystemSync());
+        try (FileChannel olderReader = FileChannel.open(older, READ);
+             FileChannel newerReader = FileChannel.open(newer, READ);
+             var channels = mockChannels(directory)) {
+            channels.when(() -> FileChannel.open(older, READ)).thenReturn(olderReader);
+            channels.when(() -> FileChannel.open(newer, READ)).thenReturn(newerReader);
+            assertThatThrownBy(() -> loader.loadSegments(layout, true, new KeyDirectory(), registry)).isSameAs(failure);
+            assertThat(olderReader.isOpen()).isFalse();
+            assertThat(newerReader.isOpen()).isFalse();
+            assertThat(cleanup.hasPendingChannels()).isFalse();
+            channels.verify(() -> FileChannel.open(active, READ), never());
+            channels.verify(() -> FileChannel.open(active, WRITE), never());
         }
         assertThat(Files.readAllBytes(active)).containsExactly(INTERRUPTED);
         assertReopenRecovers();

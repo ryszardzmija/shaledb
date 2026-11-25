@@ -1,8 +1,5 @@
 package com.ryszardzmija.shaledb.storage.serialization.io;
 
-import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
-import com.ryszardzmija.shaledb.storage.hash.index.IndexBuildException;
-import com.ryszardzmija.shaledb.storage.hash.index.IndexBuilder;
 import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException.Section;
 import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException.ReadLimitExceeded;
 import com.ryszardzmija.shaledb.storage.serialization.spec.FormatInfo.PayloadLimitExceededException;
@@ -17,6 +14,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.zip.CRC32C;
 
@@ -122,8 +120,8 @@ class RecordReaderTest {
             RecordReader reader = new RecordReader(channel, KEY_LENGTH + VALUE_LENGTH - 1);
             ReadLimitExceeded failure = catchThrowableOfType(() -> reader.read(new ReadRequest(0)), ReadLimitExceeded.class);
             assertReadLimit(failure, Limit.CONFIGURED, 5, 4);
-            assertThatExceptionOfType(IndexBuildException.class)
-                    .isThrownBy(() -> new IndexBuilder(channel, KEY_LENGTH + VALUE_LENGTH - 1).build())
+            assertThatExceptionOfType(SegmentScanner.ScanException.class)
+                    .isThrownBy(() -> new SegmentScanner(channel, KEY_LENGTH + VALUE_LENGTH - 1).scanComplete((record, offset) -> {}))
                     .withCauseInstanceOf(ReadLimitExceeded.class)
                     .withRootCauseInstanceOf(PayloadLimitExceededException.class);
         }
@@ -233,14 +231,17 @@ class RecordReaderTest {
     @Test
     void scanningStopsNormallyAtAnEmptyFileOrACompleteRecordBoundary() throws IOException {
         Path path = Files.createFile(tempDir.resolve("scan.data"));
-        ByteKey key = new ByteKey(new byte[] {1, 2, 3});
         try (FileChannel channel = FileChannel.open(path, READ)) {
-            assertThat(new IndexBuilder(channel, MAX_PAYLOAD_SIZE).build().getKeyOffset(key)).isEmpty();
+            new SegmentScanner(channel, MAX_PAYLOAD_SIZE).scanComplete((record, offset) -> {
+                throw new AssertionError("Empty segment delivered a record");
+            });
         }
 
         Files.write(path, validRecord());
         try (FileChannel channel = FileChannel.open(path, READ)) {
-            assertThat(new IndexBuilder(channel, MAX_PAYLOAD_SIZE).build().getKeyOffset(key)).contains(0L);
+            var offsets = new ArrayList<Long>();
+            new SegmentScanner(channel, MAX_PAYLOAD_SIZE).scanComplete((record, offset) -> offsets.add(offset));
+            assertThat(offsets).containsExactly(0L);
         }
     }
 
@@ -255,8 +256,9 @@ class RecordReaderTest {
             Path path = Files.write(tempDir.resolve("scan.data"), bytes);
 
             try (FileChannel channel = FileChannel.open(path, READ)) {
-                IndexBuilder builder = new IndexBuilder(channel, MAX_PAYLOAD_SIZE);
-                IndexBuildException failure = catchThrowableOfType(builder::build, IndexBuildException.class);
+                SegmentScanner scanner = new SegmentScanner(channel, MAX_PAYLOAD_SIZE);
+                SegmentScanner.ScanException failure = catchThrowableOfType(
+                        () -> scanner.scanComplete((record, offset) -> {}), SegmentScanner.ScanException.class);
                 assertThat(failure).isNotNull();
                 if (suffixSize < HEADER_SIZE) {
                     assertThat(failure.getCause()).isInstanceOfSatisfying(IncompleteRecordException.class,

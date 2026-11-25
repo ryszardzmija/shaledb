@@ -5,7 +5,7 @@ import com.ryszardzmija.shaledb.storage.StorageEngineException.Operation;
 import com.ryszardzmija.shaledb.storage.StorageEngineException.Reason;
 import com.ryszardzmija.shaledb.storage.config.StorageConfig;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityMode;
-import com.ryszardzmija.shaledb.storage.hash.index.IndexBuildException;
+import com.ryszardzmija.shaledb.storage.serialization.io.SegmentScanner.ScanException;
 import com.ryszardzmija.shaledb.storage.hash.segment.files.SegmentFileDiscoveryException;
 import com.ryszardzmija.shaledb.storage.hash.segment.loader.SegmentLoadingException;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.IndexConsistencyException;
@@ -56,7 +56,7 @@ class KeyValueStoreFailureTest {
 
         assertThat(failure.getCause()).isInstanceOf(SegmentLoadingException.class);
         Throwable segmentFailure = failure.getCause().getCause();
-        assertThat(segmentFailure).hasMessageContaining(older.toString()).hasCauseInstanceOf(IndexBuildException.class);
+        assertThat(segmentFailure).hasMessageContaining(older.toString()).hasCauseInstanceOf(ScanException.class);
         assertThat(segmentFailure.getCause().getCause()).isInstanceOfSatisfying(DataCorruptionException.class, cause -> {
             assertThat(cause.kind()).isEqualTo(DataCorruptionException.Kind.STRUCTURE);
             assertThat(cause.recordOffset()).isZero();
@@ -313,7 +313,7 @@ class KeyValueStoreFailureTest {
     }
 
     @Test
-    void mismatchedRecordInNewestApplicableImmutableSegmentStopsLookup() throws IOException {
+    void mismatchedRecordInReferencedHistoricalSegmentStopsLookup() throws IOException {
         byte[] latest = {7, 8};
         try (KeyValueStore store = new KeyValueStore(config(3, 16))) {
             store.put(KEY, VALUE);
@@ -415,7 +415,7 @@ class KeyValueStoreFailureTest {
     }
 
     @Test
-    void retiredSegmentLookupStillDetectsCorruption() throws IOException {
+    void indexedReadFromARetiredSegmentStillDetectsCorruption() throws IOException {
         try (KeyValueStore store = new KeyValueStore(config(19, 32))) {
             store.put(KEY, VALUE);
             store.put(OTHER_KEY, VALUE);

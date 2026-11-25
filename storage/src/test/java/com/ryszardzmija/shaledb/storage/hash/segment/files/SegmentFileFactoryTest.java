@@ -52,7 +52,7 @@ class SegmentFileFactoryTest {
         Path segmentFile;
         try {
             Locale.setDefault(Locale.Category.FORMAT, Locale.forLanguageTag("ar-EG-u-nu-arab"));
-            segmentFile = factory.createSegmentFile();
+            segmentFile = factory.createSegmentFile().path();
         } finally {
             Locale.setDefault(Locale.Category.FORMAT, original);
         }
@@ -73,8 +73,10 @@ class SegmentFileFactoryTest {
         long latestId = new SegmentFileDiscoverer(tempDir).discoverSegmentFiles().lastKey();
         factory = new SegmentFileFactory(tempDir, fileSystemSync, latestId);
 
-        Path segmentFile = factory.createSegmentFile();
+        SegmentFile segment = factory.createSegmentFile();
+        Path segmentFile = segment.path();
 
+        assertThat(segment.id()).isEqualTo(18);
         assertThat(segmentFile.getFileName().toString()).isEqualTo("segment_0000000000000000018.log");
         assertThat(segmentFile).exists().isRegularFile();
     }
@@ -110,7 +112,7 @@ class SegmentFileFactoryTest {
                 .hasCauseInstanceOf(DurabilityException.class)
                 .hasMessage("Failed to flush segment file creation: " + segmentFile);
 
-        Path nextSegmentFile = factory.createSegmentFile().getFileName();
+        Path nextSegmentFile = factory.createSegmentFile().path().getFileName();
 
         assertThat(nextSegmentFile.toString()).isEqualTo(SECOND_FILENAME);
         verify(fileSystemSync, times(3)).forceDirectory(tempDir);
@@ -118,8 +120,8 @@ class SegmentFileFactoryTest {
 
     @Test
     void usesMonotonicallyIncreasingIds() {
-        Path first = factory.createSegmentFile().getFileName();
-        Path second = factory.createSegmentFile().getFileName();
+        Path first = factory.createSegmentFile().path().getFileName();
+        Path second = factory.createSegmentFile().path().getFileName();
 
         assertThat(first.toString()).isEqualTo(FIRST_FILENAME);
         assertThat(second.toString()).isEqualTo(SECOND_FILENAME);
@@ -190,9 +192,10 @@ class SegmentFileFactoryTest {
     @Test
     void allocatesTheMaximumIdOnceAndThenReportsExhaustion() {
         factory = new SegmentFileFactory(tempDir, fileSystemSync, Long.MAX_VALUE - 1);
-        Path last = factory.createSegmentFile();
+        SegmentFile last = factory.createSegmentFile();
 
-        assertThat(last).isEqualTo(tempDir.resolve("segment_9223372036854775807.log")).isRegularFile();
+        assertThat(last.id()).isEqualTo(Long.MAX_VALUE);
+        assertThat(last.path()).isEqualTo(tempDir.resolve("segment_9223372036854775807.log")).isRegularFile();
         assertThatThrownBy(factory::createSegmentFile)
                 .isInstanceOf(SegmentFileException.IdExhausted.class)
                 .hasMessageContaining(Long.toString(Long.MAX_VALUE));

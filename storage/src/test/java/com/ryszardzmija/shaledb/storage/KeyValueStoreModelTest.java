@@ -6,7 +6,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -17,9 +16,9 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Random;
 import java.util.TreeMap;
-import java.util.zip.CRC32C;
 
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.config;
+import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.encodeRecord;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.hex;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.segmentCount;
 import static java.nio.file.StandardOpenOption.APPEND;
@@ -29,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class KeyValueStoreModelTest {
     private static final int OPERATION_COUNT = 300;
-    private static final int SMALL_SEGMENT_SIZE = 512;
+    private static final int SMALL_SEGMENT_SIZE = 144;
     private static final HexFormat HEX = HexFormat.of();
     private static final List<String> KEYS = List.of(
             "00", "0080", "0080ff", "00807f", "ff", "80", "001f", "0100", "ff00", "0001fe");
@@ -104,7 +103,7 @@ class KeyValueStoreModelTest {
                 previous = current;
             }
 
-            assertThat(segmentCount(tempDir)).as("segment files after seed 0x%x", seed).isGreaterThanOrEqualTo(3);
+            assertThat(segmentCount(tempDir)).as("segment files after seed 0x%x", seed).isGreaterThanOrEqualTo(12);
             recoverUnacknowledgedRecords(database, expected, random, seed);
         }
     }
@@ -122,9 +121,9 @@ class KeyValueStoreModelTest {
         Path successor = tempDir.resolve("segment_%019d.log".formatted(nextId));
 
         byte[] unacknowledged = randomValue(random);
-        byte[] overwrite = encode(0, overwritten, unacknowledged);
-        byte[] tombstone = encode(1, deleted, new byte[0]);
-        byte[] incompleteReinsertion = encode(0, deleted, randomValue(random));
+        byte[] overwrite = encodeRecord(0, hex(overwritten), unacknowledged);
+        byte[] tombstone = encodeRecord(1, hex(deleted), new byte[0]);
+        byte[] incompleteReinsertion = encodeRecord(0, hex(deleted), randomValue(random));
         byte[] retained = ByteBuffer.allocate(overwrite.length + tombstone.length).put(overwrite).put(tombstone).array();
         Files.write(successor, retained, CREATE_NEW, WRITE);
         Files.write(successor, Arrays.copyOf(incompleteReinsertion, incompleteReinsertion.length - 1), APPEND);
@@ -147,15 +146,6 @@ class KeyValueStoreModelTest {
         for (var segment : history.entrySet()) {
             assertThat(Files.readAllBytes(segment.getKey())).as(context).containsExactly(segment.getValue());
         }
-    }
-
-    private static byte[] encode(int type, String keyHex, byte[] value) {
-        byte[] key = hex(keyHex);
-        ByteBuffer bytes = ByteBuffer.allocate(13 + key.length + value.length).order(ByteOrder.LITTLE_ENDIAN);
-        bytes.putInt(0).put((byte) type).putInt(key.length).putInt(value.length).put(key).put(value);
-        var checksum = new CRC32C();
-        checksum.update(bytes.array(), 4, bytes.capacity() - 4);
-        return bytes.putInt(0, (int) checksum.getValue()).array();
     }
 
     private NavigableMap<Path, byte[]> segmentBytes() throws IOException {

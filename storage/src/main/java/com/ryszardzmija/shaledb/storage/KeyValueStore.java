@@ -15,7 +15,7 @@ public class KeyValueStore implements AutoCloseable {
     private final StorageEngine storageEngine;
 
     /**
-     * Acquires exclusive ownership of the existing database directory and rebuilds its segment indexes.
+     * Acquires exclusive ownership of the existing database directory and rebuilds its global key directory.
      *
      * @throws NullPointerException if the storage config is null
      * @throws StorageEngineException if ownership cannot be acquired or segments cannot be discovered,
