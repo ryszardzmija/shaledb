@@ -3,12 +3,15 @@ package com.ryszardzmija.shaledb.storage;
 import com.ryszardzmija.shaledb.storage.StorageEngineException.MutationOutcome;
 import com.ryszardzmija.shaledb.storage.StorageEngineException.Operation;
 import com.ryszardzmija.shaledb.storage.StorageEngineException.Reason;
+import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
+import com.ryszardzmija.shaledb.storage.hash.index.KeyDirectory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.FutureTask;
@@ -16,12 +19,24 @@ import java.util.concurrent.FutureTask;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertFailure;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.assertValue;
 import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.config;
+import static com.ryszardzmija.shaledb.storage.KeyValueStoreTestSupport.encodeRecord;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.withSettings;
 
 class DatabaseOwnershipProcessTest {
     private static final String READY = "READY";
     private static final String CLOSE = "CLOSE";
+    private static final String INTERRUPT_PUT = "interrupt-put";
+    private static final String INTERRUPT_DELETE = "interrupt-delete";
+    private static final byte[] KEY = {1};
+    private static final byte[] ORIGINAL = {2};
+    private static final byte[] REPLACEMENT = {3};
     private static final int CONTENTION_EXIT = 3;
     private static final int TIMEOUT_SECONDS = 15;
 
@@ -77,6 +92,39 @@ class DatabaseOwnershipProcessTest {
         try (Child successor = startChild(database, "probe")) {
             successor.expectExit(0);
         }
+    }
+
+    @Test
+    void replaysOverwriteAfterKillingOwnerAtDirectoryPublication() throws Exception {
+        Path database = killOwnerAtPublication(INTERRUPT_PUT, encodeRecord(0, KEY, REPLACEMENT));
+        try (var store = new KeyValueStore(config(database, 256))) {
+            assertValue(store, KEY, REPLACEMENT);
+        }
+    }
+
+    @Test
+    void replaysTombstoneAfterKillingOwnerAtDirectoryPublication() throws Exception {
+        Path database = killOwnerAtPublication(INTERRUPT_DELETE, encodeRecord(1, KEY, new byte[0]));
+        try (var store = new KeyValueStore(config(database, 256))) {
+            assertThat(store.get(KEY)).isEmpty();
+        }
+    }
+
+    private Path killOwnerAtPublication(String mode, byte[] record) throws Exception {
+        Path database = Files.createDirectory(directory.resolve("database"));
+        byte[] history = encodeRecord(0, KEY, ORIGINAL);
+        Path historical = Files.write(database.resolve("segment_000001.log"), history);
+        Path active = Files.createFile(database.resolve("segment_000002.log"));
+        try (Child owner = startChild(database, mode)) {
+            owner.awaitReady();
+            assertThat(owner.process.isAlive()).isTrue();
+            assertThat(Files.readAllBytes(active)).containsExactly(record);
+            assertLockedInParent(database);
+            owner.terminate();
+            assertThat(owner.process.exitValue()).isNotZero();
+        }
+        assertThat(Files.readAllBytes(historical)).containsExactly(history);
+        return database;
     }
 
     private static void assertLockedInParent(Path database) {
@@ -147,8 +195,13 @@ class DatabaseOwnershipProcessTest {
         public static void main(String[] args) throws IOException {
             var protocol = System.out;
             System.setOut(System.err);
+            Path database = Path.of(args[1]);
+            if (args[0].equals(INTERRUPT_PUT) || args[0].equals(INTERRUPT_DELETE)) {
+                pauseDuringPublication(database, protocol, args[0].equals(INTERRUPT_DELETE));
+                return;
+            }
             boolean hold = args[0].equals("hold");
-            try (var store = new KeyValueStore(config(Path.of(args[1]), 256))) {
+            try (var store = new KeyValueStore(config(database, 256))) {
                 if (hold) {
                     protocol.println(READY);
                     protocol.flush();
@@ -164,6 +217,32 @@ class DatabaseOwnershipProcessTest {
                 }
                 throw failure;
             }
+        }
+
+        private static void pauseDuringPublication(Path database, PrintStream protocol, boolean delete) {
+            var actualDirectory = new KeyDirectory();
+            try (var directories = mockConstruction(KeyDirectory.class, withSettings().defaultAnswer(delegatesTo(actualDirectory)));
+                 var store = new KeyValueStore(config(database, 256))) {
+                assertValue(store, KEY, ORIGINAL);
+                var directory = directories.constructed().getFirst();
+                var key = new ByteKey(KEY);
+                if (delete) {
+                    doAnswer(call -> awaitTermination(protocol)).when(directory).remove(key);
+                    store.delete(KEY);
+                } else {
+                    doAnswer(call -> awaitTermination(protocol)).when(directory).markPresent(eq(key), any());
+                    store.put(KEY, REPLACEMENT);
+                }
+                throw new AssertionError("Mutation returned before the parent killed the child");
+            }
+        }
+
+        private static Void awaitTermination(PrintStream protocol) throws IOException {
+            // Signal only after the append returns and before updating the directory.
+            protocol.println(READY);
+            protocol.flush();
+            new BufferedReader(new InputStreamReader(System.in)).readLine();
+            throw new AssertionError("Expected the parent to kill the child while publication was paused");
         }
     }
 }

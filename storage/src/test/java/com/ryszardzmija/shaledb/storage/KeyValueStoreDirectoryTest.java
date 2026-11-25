@@ -102,7 +102,7 @@ class KeyValueStoreDirectoryTest {
     }
 
     @Test
-    void replaysCompatibleNamesAndOffsetsInNumericOrderWithoutRewritingHistory() throws IOException {
+    void replaysM1HistoryInNumericOrderAndSupportsMutationsAndRollover() throws IOException {
         byte[] keyOld = encodeRecord(0, KEY, EARLIER);
         byte[] keyLatest = encodeRecord(0, KEY, LATEST);
         byte[] keyDeleted = encodeRecord(1, KEY, EMPTY);
@@ -115,8 +115,8 @@ class KeyValueStoreDirectoryTest {
         Path middle = writeSegment("10", keyDeleted, otherDeleted, orderEarlier, orderLatest);
         Path localized = writeSegment("٠٠٠٠٢١", keyDeleted, keyOld, otherDeleted, collisionEmpty);
         Path active = writeSegment("0000000000000000300");
-        var before = Map.of(oldest, Files.readAllBytes(oldest), middle, Files.readAllBytes(middle),
-                localized, Files.readAllBytes(localized), active, EMPTY);
+        var history = Map.of(oldest, Files.readAllBytes(oldest), middle, Files.readAllBytes(middle),
+                localized, Files.readAllBytes(localized));
 
         for (int i = 0; i < 2; i++) {
             try (KeyValueStore store = open()) {
@@ -126,10 +126,45 @@ class KeyValueStoreDirectoryTest {
                 assertThat(store.get(OTHER)).isEmpty();
                 assertThat(store.get(MISSING)).isEmpty();
             }
-            for (var file : before.entrySet()) {
+            assertThat(active).isEmptyFile();
+            for (var file : history.entrySet()) {
                 assertThat(Files.readAllBytes(file.getKey())).containsExactly(file.getValue());
             }
         }
+
+        // These three mutations fit in segment 300. The following overwrite needs a successor.
+        var config = new StorageConfig(48, 35, directory, DurabilityMode.SYNC_EACH_WRITE);
+        Path successor = directory.resolve("segment_0000000000000000301.log");
+        byte[] retiredBytes;
+        try (var store = new KeyValueStore(config)) {
+            store.put(KEY, LATEST);
+            store.delete(COLLISION);
+            store.put(OTHER, EMPTY);
+            assertValue(store, KEY, LATEST);
+            assertValue(store, OTHER, EMPTY);
+            assertThat(store.get(COLLISION)).isEmpty();
+            assertThat(successor).doesNotExist();
+            retiredBytes = Files.readAllBytes(active);
+
+            store.put(OTHER, LATEST);
+            assertThat(successor).isRegularFile();
+            assertM1HistoryAfterMutations(store);
+        }
+        try (var store = new KeyValueStore(config)) {
+            assertM1HistoryAfterMutations(store);
+        }
+        assertThat(Files.readAllBytes(active)).containsExactly(retiredBytes);
+        for (var file : history.entrySet()) {
+            assertThat(Files.readAllBytes(file.getKey())).containsExactly(file.getValue());
+        }
+    }
+
+    private static void assertM1HistoryAfterMutations(KeyValueStore store) {
+        assertValue(store, KEY, LATEST);
+        assertValue(store, OTHER, LATEST);
+        assertValue(store, ORDER_KEY, LATEST);
+        assertThat(store.get(COLLISION)).isEmpty();
+        assertThat(store.get(MISSING)).isEmpty();
     }
 
     @Test
