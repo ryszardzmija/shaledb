@@ -1,6 +1,6 @@
 # ShaleDB architecture guide
 
-ShaleDB is a local, append-only store for binary keys and values. Both embedded Java callers and the gRPC server use the same storage engine. [Build and run commands](../README.md)
+ShaleDB is a local, append-only store for binary keys and values. Both embedded Java callers and the gRPC server use the same storage engine. [Build and run commands](../README.md) · [Engineering guidelines](../AGENTS.md)
 
 ## Storage engine
 

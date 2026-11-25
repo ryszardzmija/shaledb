@@ -12,7 +12,7 @@ All three calls reject a null or empty key. Mutations also check the combined ke
 
 ## Success and retry
 
-Both `put` and `delete` return `void`. A normal return means the record passed its required durability barrier and the engine published its effect. Subsequent serialized reads and ordinary reopens see the latest mutation under the supported storage assumptions. If the caller loses the acknowledgment, a complete record can still take effect on replay. [Durability and recovery](durability-and-recovery.md)
+Both `put` and `delete` return `void`. A normal return means the record passed its required durability barrier and the mutable segment published the returned offset or a deletion marker. Subsequent serialized reads and ordinary reopens see the latest mutation under the supported storage assumptions. If the caller loses the acknowledgment, a complete record can still take effect on replay. [Durability and recovery](durability-and-recovery.md)
 
 Repeating an identical mutation leaves the same logical value if nothing intervenes, but each successful call appends a record. Retrying a delete after another caller reinserts the key deletes that new value. There are no request IDs, conditional updates or exactly-once semantics.
 

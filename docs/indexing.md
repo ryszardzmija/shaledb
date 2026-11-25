@@ -1,6 +1,6 @@
 # Indexing
 
-Each segment has its own in-memory hash index. A record offset is a nonnegative byte position within that segment. The active reader and writer share an index. Each historical reader keeps the index for its file. There is no global key directory or persistent index. [HashIndex](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/HashIndex.java)
+Each segment owns one in-memory hash index. A record offset is a nonnegative byte position within that segment. The physical reader and writer operate independently of the index. The engine reconstructs local indexes from segment files at startup. [HashIndex](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/HashIndex.java)
 
 ## Key identity and local state
 
@@ -14,11 +14,15 @@ Each segment has its own in-memory hash index. A record offset is a nonnegative 
 
 A normal record replaces any previous local offset and clears a deletion marker. A tombstone installs a marker and removes the offset. Simply removing a deleted key would make it indistinguishable from a local miss and could expose an older value. These map and set changes rely on caller serialization.
 
-## Lookup and reconstruction
+## Lookup
 
-The engine probes the active segment first and historical segments from highest to lowest ID. For a present entry, the reader checks the offset and validates the record against the actual file extent, payload budget and CRC32C. It also requires a normal record with the exact requested key. A valid record for a different key or a tombstone raises `INVALID_INDEX_REFERENCE`. A negative offset or one beyond EOF raises `INVALID_RECORD_LOCATION`. A point read exactly at EOF encounters an incomplete header. A failed indexed read ends the lookup and disables further operations. [SegmentReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentReader.java) · [Record format](record-format.md)
+The engine probes the active segment first and historical segments from highest to lowest ID. Both segment types use `SegmentLookup` to check the deletion marker before resolving an offset. A present entry calls `SegmentReader.readValue(offset, key)`. The record must fit the actual file extent and payload budget, pass CRC32C validation, and be a normal record with the exact requested key. A valid record for a different key or a tombstone raises `INVALID_INDEX_REFERENCE`. A negative offset or one beyond EOF raises `INVALID_RECORD_LOCATION`. A point read exactly at EOF encounters an incomplete header. A failed indexed read ends the lookup and disables further operations. [SegmentLookup](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentLookup.java) · [SegmentReader](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentReader.java) · [Record format](record-format.md)
 
-Live mutations publish their local index transition after the file force. On open, replay starts at offset zero in **each** segment. It reads a complete validated record, applies the same transition and advances by its encoded size. Forward replay makes the last local record win. Historical replay must reach exact EOF. Only a discovered active file can contribute an index built from a recoverable prefix. [IndexBuilder](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/IndexBuilder.java) · [Durability and recovery](durability-and-recovery.md)
+## Live updates and replay
+
+`SegmentWriter` returns the physical write result after append and force. `MutableSegment` then publishes the returned starting offset for a put or a deletion marker for a delete. Append and force failures abort the mutation before publication. [SegmentWriter](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/SegmentWriter.java) · [MutableSegment](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/segment/model/MutableSegment.java)
+
+On open, `SegmentScanner` captures the file extent and scans each segment from offset zero. It passes each fully validated record and its starting offset to `IndexBuilder`, which applies the same transitions to a provisional `HashIndex`. Replay in file order makes the last local record win. Historical replay requires exact EOF. Only a discovered active file can contribute an index built from a recoverable prefix. [SegmentScanner](../storage/src/main/java/com/ryszardzmija/shaledb/storage/serialization/io/SegmentScanner.java) · [IndexBuilder](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/index/IndexBuilder.java) · [Durability and recovery](durability-and-recovery.md)
 
 ## Cost
 

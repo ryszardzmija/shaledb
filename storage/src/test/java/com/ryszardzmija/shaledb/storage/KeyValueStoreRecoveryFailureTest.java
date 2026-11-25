@@ -5,6 +5,8 @@ import com.ryszardzmija.shaledb.storage.StorageEngineException.Reason;
 import com.ryszardzmija.shaledb.storage.config.StorageConfig;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityException;
 import com.ryszardzmija.shaledb.storage.durability.DurabilityMode;
+import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
+import com.ryszardzmija.shaledb.storage.hash.index.HashIndex;
 import com.ryszardzmija.shaledb.storage.hash.segment.model.SegmentWriter;
 import com.ryszardzmija.shaledb.storage.serialization.io.IncompleteRecordException;
 import org.junit.jupiter.api.BeforeEach;
@@ -76,6 +78,43 @@ class KeyValueStoreRecoveryFailureTest {
             verify(reader).read(any(ByteBuffer.class), eq(BOUNDARY));
             verify(writer, never()).truncate(anyLong());
             verify(writer, never()).force(true);
+            assertThat(readFile.isOpen()).isFalse();
+            assertThat(writeFile.isOpen()).isFalse();
+        }
+        assertThat(Files.readAllBytes(active)).containsExactly(INTERRUPTED);
+        assertReopenRecovers();
+    }
+
+    @Test
+    void replayFailurePreventsRecoveryAndClosesAllAcquiredSegmentChannels() throws IOException {
+        var replayFailure = new IllegalStateException("index replay failed");
+        var cleanupFailure = new IOException("reader close reported an error");
+        Path historical = Files.createFile(segment(2));
+        try (FileChannel historicalReader = FileChannel.open(historical, READ);
+             FileChannel readFile = FileChannel.open(active, READ);
+             FileChannel writeFile = FileChannel.open(active, WRITE)) {
+            FileChannel reader = mock(FileChannel.class, delegatesTo(readFile));
+            FileChannel writer = mock(FileChannel.class, delegatesTo(writeFile));
+            doAnswer(call -> {
+                readFile.close();
+                throw cleanupFailure;
+            }).when(reader).close();
+
+            try (var channels = useActiveChannels(reader, writer, null);
+                 var indexes = mockConstruction(HashIndex.class, (index, context) -> {
+                     if (context.getCount() == 2) {
+                         doThrow(replayFailure).when(index).markPresent(new ByteKey(KEY), 0);
+                     }
+                 })) {
+                channels.when(() -> FileChannel.open(historical, READ)).thenReturn(historicalReader);
+                assertThatThrownBy(this::open).isSameAs(replayFailure).hasSuppressedException(cleanupFailure);
+                assertThat(indexes.constructed()).hasSize(2);
+            }
+
+            verify(reader, never()).read(any(ByteBuffer.class), eq(BOUNDARY));
+            verify(writer, never()).truncate(anyLong());
+            verify(writer, never()).force(true);
+            assertThat(historicalReader.isOpen()).isFalse();
             assertThat(readFile.isOpen()).isFalse();
             assertThat(writeFile.isOpen()).isFalse();
         }

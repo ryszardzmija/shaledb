@@ -1,6 +1,6 @@
 # Concurrency and lifecycle
 
-An engine has exclusive ownership of one database directory. Calls on that engine, including reads and close, must also be serialized by its caller. The gRPC server supplies a single worker. An embedded caller must provide equivalent serialization. Index transitions update two collections, rollover transfers a live reader, and close releases channels. Directory locking alone cannot protect these operations from one another. [StorageEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/StorageEngine.java)
+An engine has exclusive ownership of one database directory. Calls on that engine, including reads and close, must also be serialized by its caller. The gRPC server supplies a single worker. An embedded caller must provide equivalent serialization. The mutable segment updates its local index after a durable append. Index transitions update two collections, rollover transfers the reader and local index, and close releases channels. Directory locking alone cannot protect these operations from one another. [StorageEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/StorageEngine.java)
 
 ## Acquiring ownership
 

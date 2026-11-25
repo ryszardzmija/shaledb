@@ -1,11 +1,10 @@
 package com.ryszardzmija.shaledb.storage.hash.segment.model;
 
-import com.ryszardzmija.shaledb.storage.hash.index.Index;
-import com.ryszardzmija.shaledb.storage.serialization.io.RecordIOException;
-import com.ryszardzmija.shaledb.storage.serialization.io.RecordReader;
 import com.ryszardzmija.shaledb.storage.hash.index.ByteKey;
+import com.ryszardzmija.shaledb.storage.hash.index.Index;
 import com.ryszardzmija.shaledb.storage.hash.index.IndexBuildException;
 import com.ryszardzmija.shaledb.storage.hash.index.IndexBuilder;
+import com.ryszardzmija.shaledb.storage.serialization.io.RecordReader;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -17,14 +16,16 @@ public class ImmutableSegment implements AutoCloseable {
     private final Path path;
     private final FileChannel readChannel;
     private final SegmentReader segmentReader;
+    private final Index index;
     private final SegmentChannelCleanup channelCleanup;
     private boolean closeStarted;
 
-    ImmutableSegment(Path path, FileChannel readChannel, SegmentReader segmentReader,
+    ImmutableSegment(Path path, FileChannel readChannel, SegmentReader segmentReader, Index index,
                       SegmentChannelCleanup channelCleanup) {
         this.path = path;
         this.readChannel = readChannel;
         this.segmentReader = segmentReader;
+        this.index = index;
         this.channelCleanup = channelCleanup;
     }
 
@@ -37,8 +38,8 @@ public class ImmutableSegment implements AutoCloseable {
             openedReadChannel = FileChannel.open(path, StandardOpenOption.READ);
 
             this.readChannel = openedReadChannel;
-            Index index = new IndexBuilder(readChannel, config.maxPayloadSize()).build();
-            this.segmentReader = new SegmentReader(new RecordReader(readChannel, config.maxPayloadSize()), index);
+            this.index = new IndexBuilder(readChannel, config.maxPayloadSize()).build();
+            this.segmentReader = new SegmentReader(new RecordReader(readChannel, config.maxPayloadSize()));
         } catch (IOException | RuntimeException | Error e) {
             channelCleanup.closeAfterFailure(path, e, openedReadChannel);
 
@@ -57,11 +58,7 @@ public class ImmutableSegment implements AutoCloseable {
     }
 
     public LookupResult get(ByteKey key) {
-        try {
-            return segmentReader.get(key);
-        } catch (RecordIOException e) {
-            throw new SegmentIOException("Failed to read from segment " + path, e);
-        }
+        return SegmentLookup.get(path, index, segmentReader, key);
     }
 
     public long size() {

@@ -9,25 +9,31 @@ flowchart LR
     Worker --> Store[KeyValueStore]
     Embedded[Embedded caller] --> Store
     Store --> Engine[HashIndexEngine]
-    Engine --> Active[Active segment and index]
-    Engine --> History[Historical segments and indexes]
-    Active -->|read and append| Files[(Local segment files)]
-    History -->|read| Files
+    Engine --> Active[MutableSegment]
+    Engine --> History[ImmutableSegment]
+    Active --> ActiveIndex[Active local index]
+    History --> HistoryIndexes[Historical local indexes]
+    Active --> ActiveReader[SegmentReader]
+    History --> HistoryReaders[SegmentReader per historical segment]
+    Active --> Writer[SegmentWriter]
+    ActiveReader --> Files[(Local segment files)]
+    HistoryReaders --> Files
+    Writer --> Files
 ```
 
 | Module | Responsibility |
 | --- | --- |
 | `api` | Defines the `shaledb.v1.KeyValueStore` protobuf service and generates its Java messages and gRPC bindings. File layout and engine diagnostics are private to storage. [Service definition](../api/src/main/proto/shaledb/key_value_store.proto) |
-| `storage` | Exposes the closeable `KeyValueStore` façade. Its `HashIndexEngine` owns the directory lock, segments and indexes, and implements validation, persistence and recovery using local files. An embedded application can use it independently of the server. [KeyValueStore](../storage/src/main/java/com/ryszardzmija/shaledb/storage/KeyValueStore.java) · [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java) |
+| `storage` | Exposes the closeable `KeyValueStore` façade. Its `HashIndexEngine` owns the directory lock and segment layout. Each segment owns its local index and channels. An embedded application can use the store independently of the server. [KeyValueStore](../storage/src/main/java/com/ryszardzmija/shaledb/storage/KeyValueStore.java) · [HashIndexEngine](../storage/src/main/java/com/ryszardzmija/shaledb/storage/hash/HashIndexEngine.java) |
 | `server` | Loads configuration, opens one store and adapts unary RPCs to serialized engine calls. It owns request scheduling, response delivery and process shutdown. [Server architecture](server-architecture.md) |
 
 ## Read and write paths
 
-On open, the engine acquires exclusive directory ownership, discovers segments by numeric ID and rebuilds an index for each file. The highest ID is the **active segment** (mutable). All lower IDs are **historical segments** (immutable). Embedded callers must serialize operations, including close. [Concurrency and lifecycle](concurrency-and-lifecycle.md)
+On open, the engine acquires exclusive directory ownership and discovers segments by numeric ID. The highest ID is the **active segment** (mutable). All lower IDs are **historical segments** (immutable). `SegmentScanner` supplies validated records and offsets to `IndexBuilder` to reconstruct each local index. Embedded callers must serialize operations, including close. [Concurrency and lifecycle](concurrency-and-lifecycle.md) · [Indexing](indexing.md)
 
-A mutation validates its input, selects a segment with room for the whole encoded record, then appends a normal record or a tombstone at EOF. After a successful file force, it publishes the new offset or deletion marker in the active index and returns. The previous records stay on disk. [Segment management](segment-management.md) · [Durability and recovery](durability-and-recovery.md)
+A mutation validates its input and selects a segment with room for the whole encoded record. `SegmentWriter` appends a normal record or tombstone at EOF and returns the physical write result after force succeeds. `MutableSegment` then publishes the returned offset or a deletion marker. Earlier records stay on disk. [Segment management](segment-management.md) · [Durability and recovery](durability-and-recovery.md)
 
-A lookup probes the active index and then the historical indexes in descending ID order. The first entry decides the result. A present entry leads to a validated read at its offset. A deletion marker masks older values. A miss across all indexes requires no record I/O. [Indexing](indexing.md)
+A lookup probes the active index and then the historical indexes in descending ID order. For a present entry, the segment passes the offset and expected key to `SegmentReader.readValue` for validation and retrieval. A deletion marker masks older values. A miss across all indexes requires no record I/O. [Indexing](indexing.md)
 
 ## Design costs
 

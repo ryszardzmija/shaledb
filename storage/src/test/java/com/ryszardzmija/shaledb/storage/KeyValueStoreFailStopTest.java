@@ -108,12 +108,15 @@ class KeyValueStoreFailStopTest {
     private void assertAppendFailure(Operation operation, byte[] record, int prefixLength) throws IOException {
         IOException writeFailure = new IOException("append failed");
         byte[] expected = historyWith(record, prefixLength);
-        try (FileChannel channel = FileChannel.open(active, WRITE)) {
+        HashIndex originalIndex = new HashIndex();
+        try (FileChannel channel = FileChannel.open(active, WRITE);
+             var indexes = mockConstruction(HashIndex.class, withSettings().defaultAnswer(delegatesTo(originalIndex)))) {
             FileChannel writer = mock(FileChannel.class, delegatesTo(channel));
             try (KeyValueStore store = openWithWriter(writer)) {
                 store.put(KEY, VALUE);
                 assertValue(store, KEY, VALUE);
-                clearInvocations(writer);
+                HashIndex index = indexes.constructed().getFirst();
+                clearInvocations(writer, index);
                 if (prefixLength == 0) {
                     doThrow(writeFailure).when(writer).write(any(ByteBuffer.class));
                 } else {
@@ -137,8 +140,9 @@ class KeyValueStoreFailStopTest {
                 assertThat(failure).hasRootCause(writeFailure);
                 verify(writer, times(prefixLength == 0 ? 1 : 2)).write(any(ByteBuffer.class));
                 verify(writer, never()).force(true);
+                verifyNoInteractions(index);
                 assertThat(Files.readAllBytes(active)).containsExactly(expected);
-                assertRejectionsPreserveHistory(store, failure, expected, writer);
+                assertRejectionsPreserveHistory(store, failure, expected, writer, index);
                 assertLocked();
             }
             verify(writer, never()).force(true);

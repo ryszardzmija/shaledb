@@ -13,9 +13,9 @@ storage:
 | Field under `storage` | Type and constraint | Use |
 | --- | --- | --- |
 | `maxSegmentSize` | Signed 64-bit integer in bytes, from `13 + maxPayloadSize` through `Long.MAX_VALUE` | Capacity for new appends, including each record's header |
-| `maxPayloadSize` | Signed 64-bit integer in bytes, from 1 through `Integer.MAX_VALUE - 13` | Maximum combined key and value length for a mutation or decoded record |
+| `maxPayloadSize` | Signed 64-bit integer in bytes, from 1 through `Integer.MAX_VALUE - 13` | Maximum combined key and value length for a mutation, point read or sequential scan |
 | `segmentDir` | Required path string in YAML, non-null `Path` in Java | Directory containing segment files and `LOCK`. Relative paths resolve against the process working directory. |
-| `durabilityMode` | Required enum. The only policy is `SYNC_EACH_WRITE`. The YAML loader also accepts its numeric ordinal `0`. | Force each record before publishing its index entry |
+| `durabilityMode` | Required enum. The only policy is `SYNC_EACH_WRITE`. The YAML loader also accepts its numeric ordinal `0`. | The segment writer forces each record before returning its append result for index publication. |
 
 The loader rejects unknown properties, fractional sizes and quoted numeric sizes. The mapper checks for missing fields and the constructor enforces the size relationship before opening the engine. Equality is valid. For example, `maxSegmentSize: 14` and `maxPayloadSize: 1` admit a one-byte key with an empty value or its tombstone. Allocation of an otherwise representable record still depends on available heap. [StorageConfig](../storage/src/main/java/com/ryszardzmija/shaledb/storage/config/StorageConfig.java) · [YAML loader](../server/src/main/java/com/ryszardzmija/shaledb/server/config/ApplicationConfigLoader.java)
 
